@@ -5,6 +5,38 @@
 
 ---
 
+## FPGA Synthesis Results (Arty A7-100T)
+
+> Synthesized with **Yosys 0.52** (`synth_xilinx -family xc7`), target `xc7a100tcsg324-1`, 150 MHz.
+> Full report: [`docs/synthesis_report.md`](docs/synthesis_report.md)
+
+### Per-module resource usage
+
+| Module | LUT | FF | DSP48E1 | Notes |
+|--------|-----|----|---------|-------|
+| `vpu_core_synth` | 25,036 | 4,262 | 11 | 256-wide SIMD, Q8.8 fixed-point |
+| `gemm_int4_fpga` | 8,848 | 15,118 | **4** | LUT-based INT8×INT4, serialized scale |
+| KVC Controller (est.) | ~2,000 | ~1,500 | 0 | PagedAttention |
+| MoE Router (est.) | ~1,500 | ~800 | 4 | top-k softmax |
+| Interconnect (est.) | ~3,000 | ~2,000 | 0 | — |
+| **ORBIT-G1 total** | **~40,384** | **~23,680** | **~19** | |
+
+### Fit on Arty A7-100T (82,800 LUT / 90 DSP / 135 BRAM36)
+
+```
+LUT      40,384 / 82,800  ████████████████████░░░░░░░░░░░░░░░░░░░░  48.8%  ✅
+FF       23,680 / 126,800 ████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  18.7%  ✅
+DSP48E1      19 / 90      ████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  21.1%  ✅
+BRAM36        6 / 135     ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   4.4%  ✅
+```
+
+**전체 ORBIT-G1이 Arty A7-100T에 49% LUT로 fit.** DSP 사용량은 80% 목표(72개) 대비 19개(26%)로 충분한 여유.
+
+> `gemm_int4_synth.sv` (원본) 는 DSP 1,040개를 사용해 FPGA에 들어가지 않음.
+> `gemm_int4_fpga.sv` 는 INT8×INT4 shift-and-add로 DSP를 4개로 줄인 FPGA 전용 버전.
+
+---
+
 ## ⚠️ Verification Status
 
 | Component | Simulation | Real Hardware |
@@ -215,10 +247,11 @@ The following have **not** been measured on real hardware:
   ✅ INT4 GEMM (AWQ)
   ✅ Full LLM forward pass integration test
 
-[IN PROGRESS] Phase B — Synthesizable RTL
-  🔄 vpu_core_synth.sv (Q8.8 fixed-point, no real/exp/sqrt)
-  ⏳ FPGA synthesis report (Vivado, xc7a100t)
-  ⏳ Timing closure at 150 MHz
+[DONE] Phase B — Synthesizable RTL
+  ✅ vpu_core_synth.sv (Q8.8 fixed-point, LUT-based LUTs, 9/9 cocotb PASS)
+  ✅ gemm_int4_fpga.sv (DSP 1040→4, fits Arty A7-100T)
+  ✅ Yosys synthesis report — 49% LUT, 21% DSP on xc7a100t
+  ⏳ Vivado P&R + timing closure at 150 MHz (scripts/vivado_synth.tcl ready)
 
 [TODO] Phase C — FPGA board validation
   ⏳ Arty A7-100T bitstream
