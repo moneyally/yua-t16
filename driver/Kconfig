@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# ORBIT-G1 PCIe AI Accelerator — Kconfig
+#
+# To enable in a kernel build:
+#   CONFIG_ORBIT_G1=m   (build as module)
+#   CONFIG_ORBIT_G1=y   (build into kernel — not recommended for hardware drivers)
+
+config ORBIT_G1
+	tristate "ORBIT-G1 PCIe AI Accelerator driver"
+	depends on PCI && PCI_MSI
+	help
+	  Driver for the ORBIT-G1 PCIe Gen4 AI accelerator.
+
+	  The ORBIT-G1 provides 4 descriptor queues (compute, utility,
+	  telemetry, high-priority), GDDR6 device memory management, and
+	  a character device interface (/dev/orbit_g1_N) for userspace
+	  submission of 64-byte hardware descriptors.
+
+	  Supports descriptor types: DMA_2D, GEMM_INT8, GEMM_INT4,
+	  VECTOR_OP, VECTOR_OP_EX, KVC_READ/WRITE, MOE_ROUTE, SOFTMAX,
+	  BARRIER, EVENT, PERF_SNAPSHOT, FORMAT_CONVERT, COPY_2D_PLUS,
+	  FINGERPRINT.
+
+	  To compile as a module, choose M here.  The module will be called
+	  orbit_g1.ko.
+
+	  If unsure, say N.
+
+config ORBIT_G1_DEBUG
+	bool "ORBIT-G1 verbose debug logging"
+	depends on ORBIT_G1
+	default n
+	help
+	  Enable verbose pr_debug() output for the ORBIT-G1 driver.
+	  This adds overhead and should only be enabled during development.
+
+	  If unsure, say N.
