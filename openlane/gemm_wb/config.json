@@ -1,0 +1,50 @@
+{
+    "DESIGN_NAME": "gemm_wb_wrapper",
+    "DESIGN_IS_CORE": 0,
+
+    "VERILOG_FILES": [
+        "dir::src/gemm_int4_sky130.v",
+        "dir::src/gemm_wb_wrapper.v"
+    ],
+
+    "CLOCK_PORT": "wb_clk_i",
+    "CLOCK_NET":  "wb_clk_i",
+    "CLOCK_PERIOD": 10.0,
+
+    "FP_SIZING": "absolute",
+    "DIE_AREA": "0 0 1200 1200",
+
+    "FP_CORE_UTIL": 40,
+    "PL_TARGET_DENSITY": 0.45,
+
+    "MAX_FANOUT_CONSTRAINT": 16,
+    "MAX_TRANSITION_CONSTRAINT": 1.5,
+
+    "PL_RESIZER_SETUP_SLACK_MARGIN": 0.3,
+    "GLB_RESIZER_SETUP_SLACK_MARGIN": 0.2,
+    "GLB_RESIZER_HOLD_SLACK_MARGIN":  0.2,
+    "PL_RESIZER_HOLD_SLACK_MARGIN":   0.3,
+
+    "SYNTH_STRATEGY": "DELAY 0",
+    "SYNTH_BUFFERING": 1,
+
+    "RUN_HEURISTIC_DIODE_INSERTION": 1,
+    "HEURISTIC_ANTENNA_THRESHOLD": 110,
+    "GRT_REPAIR_ANTENNAS": 1,
+
+    "VDD_NETS": ["vccd1"],
+    "GND_NETS": ["vssd1"],
+
+    "IO_SYNC": 0,
+
+    "pdk::sky130*": {
+        "FP_CORE_UTIL": 40,
+        "RT_MAX_LAYER": "met4",
+        "scl::sky130_fd_sc_hd": {
+            "CLOCK_PERIOD": 10.0
+        },
+        "scl::sky130_fd_sc_hs": {
+            "CLOCK_PERIOD": 7.0
+        }
+    }
+}
