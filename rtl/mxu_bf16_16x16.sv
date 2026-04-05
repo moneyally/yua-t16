@@ -75,48 +75,33 @@ module mxu_bf16_16x16 #(
 
     r_sign = a_sign ^ b_sign;
 
-    // Zero check
     if (a_exp == 8'd0 || b_exp == 8'd0) begin
+      // Zero input → zero result
       bf16_mul = 32'd0;
-      // end case
-    end
-
-    // Inf/NaN check (simplified: treat as max finite)
-    if (a_exp == 8'hFF || b_exp == 8'hFF) begin
+    end else if (a_exp == 8'hFF || b_exp == 8'hFF) begin
+      // Inf/NaN → clamp to max finite
       bf16_mul = {r_sign, 8'hFE, 23'h7FFFFF};
-      // end case
-    end
-
-    // Mantissa multiply: (1.a_man) × (1.b_man)
-    man_prod = {1'b1, a_man} * {1'b1, b_man};
-    // man_prod is 16 bits: [15] is always 1 if both inputs nonzero
-    // Format: xx.xxxxxxxxxxxxxx (2 integer bits, 14 fraction)
-
-    // Exponent
-    r_exp_raw = {1'b0, a_exp} + {1'b0, b_exp} - 9'd127;
-
-    // Normalize: if man_prod[15]==1, shift right by 1, exp+1
-    if (man_prod[15]) begin
-      r_man = {man_prod[14:0], 8'd0}; // 15 bits → 23 bits (pad low)
-      r_exp_raw = r_exp_raw + 1;
     end else begin
-      r_man = {man_prod[13:0], 9'd0}; // 14 bits → 23 bits (pad low)
-    end
+      // Normal multiply
+      man_prod = {1'b1, a_man} * {1'b1, b_man};
+      r_exp_raw = {1'b0, a_exp} + {1'b0, b_exp} - 9'd127;
 
-    // Clamp exponent
-    if (r_exp_raw[8] || r_exp_raw == 9'd0) begin
-      // Underflow
-      bf16_mul = 32'd0;
-      // end case
-    end
-    if (r_exp_raw >= 9'd255) begin
-      // Overflow → max finite
-      bf16_mul = {r_sign, 8'hFE, 23'h7FFFFF};
-      // end case
-    end
+      if (man_prod[15]) begin
+        r_man = {man_prod[14:0], 8'd0};
+        r_exp_raw = r_exp_raw + 1;
+      end else begin
+        r_man = {man_prod[13:0], 9'd0};
+      end
 
-    r_exp = r_exp_raw[7:0];
-    bf16_mul = {r_sign, r_exp, r_man};
+      if (r_exp_raw[8] || r_exp_raw == 9'd0) begin
+        bf16_mul = 32'd0; // underflow
+      end else if (r_exp_raw >= 9'd255) begin
+        bf16_mul = {r_sign, 8'hFE, 23'h7FFFFF}; // overflow
+      end else begin
+        r_exp = r_exp_raw[7:0];
+        bf16_mul = {r_sign, r_exp, r_man};
+      end
+    end
   endfunction
 
   // ═══════════════════════════════════════════════════════════
@@ -136,12 +121,9 @@ module mxu_bf16_16x16 #(
 
     if (a_e == 0 && a_m == 0) begin
       fp32_add = b;
-      // end case
-    end
-    if (b_e == 0 && b_m == 0) begin
+    end else if (b_e == 0 && b_m == 0) begin
       fp32_add = a;
-      // end case
-    end
+    end else begin
 
     a_full = {1'b1, a_m, 1'b0};
     b_full = {1'b1, b_m, 1'b0};
@@ -187,10 +169,7 @@ module mxu_bf16_16x16 #(
     // Normalize
     if (sum == 0) begin
       fp32_add = 32'd0;
-      // end case
-    end
-
-    if (sum[25]) begin
+    end else if (sum[25]) begin
       sum = sum >> 1;
       r_e = r_e + 1;
     end else begin
@@ -206,6 +185,8 @@ module mxu_bf16_16x16 #(
     end else begin
       fp32_add = {r_s, r_e, r_m};
     end
+
+    end // close outer else from zero-check
   endfunction
 
   // ═══════════════════════════════════════════════════════════
