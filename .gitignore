@@ -12,3 +12,4 @@ docs/
 *.log
 *.str
 *.pb
+fpga/vck190/*.bin
