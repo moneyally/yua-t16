@@ -143,14 +143,14 @@ module mxu_bf16_128x128 #(
       case (sst)
         S_IDLE: begin
           if (acc_clr) begin
-            // Clear all tile accumulators
+            // Clear all tile accumulators — takes priority over start
             for (int r = 0; r < TILES; r++)
               for (int c = 0; c < TILES; c++)
                 for (int i = 0; i < TILE_DIM; i++)
                   for (int j = 0; j < TILE_DIM; j++)
                     tile_acc[r][c][i][j] <= 32'd0;
-          end
-          if (start) begin
+            // Do NOT accept start on same cycle as clear
+          end else if (start) begin
             k_total <= k_steps;
             k_cnt   <= 16'd0;
             first_k <= 1'b1;
