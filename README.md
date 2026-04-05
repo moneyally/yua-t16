@@ -1,291 +1,206 @@
-# YUA-T16 / ORBIT-G1 — Open-Source LLM Inference Accelerator RTL
+# ORBIT-G2 — Custom LLM Inference Accelerator
 
-> **Open-source SystemVerilog RTL for a custom LLM inference accelerator chip.**
-> Designed to run GPT-class MoE Transformer models (e.g., GPT-OSS-20B) end-to-end on dedicated hardware.
+> Custom SystemVerilog RTL + Python host stack for a dedicated LLM inference chip.  
+> Full software-hardware closed loop verified: **237 tests** across RTL simulation, cocotb co-simulation, and Python host stack.
 
 ---
 
-## FPGA Synthesis Results (Arty A7-100T)
+## What is this?
 
-> Synthesized with **Yosys 0.52** (`synth_xilinx -family xc7`), target `xc7a100tcsg324-1`, 150 MHz.
-> Full report: [`docs/synthesis_report.md`](docs/synthesis_report.md)
+ORBIT-G2 is an open-source hardware accelerator for LLM inference. Built from scratch — RTL, host software, FPGA bitstream, everything.
 
-### Per-module resource usage
+- **23 RTL modules** in SystemVerilog (control plane + compute pipeline)
+- **Python host stack** with HAL, CLI, descriptor packer, trace decoder, scheduler
+- **Co-simulation**: Python host stack drives RTL via cocotb — GEMM end-to-end verified
+- **FPGA target**: VCK190 (Versal VC1902) PCIe Gen4 x8
+- **Bitstream generated**: Vivado 2025.2, synthesis + implementation + PDI complete
 
-| Module | LUT | FF | DSP48E1 | Notes |
-|--------|-----|----|---------|-------|
-| `vpu_core_synth` | 25,036 | 4,262 | 11 | 256-wide SIMD, Q8.8 fixed-point |
-| `gemm_int4_fpga` | 8,848 | 15,118 | **4** | LUT-based INT8×INT4, serialized scale |
-| KVC Controller (est.) | ~2,000 | ~1,500 | 0 | PagedAttention |
-| MoE Router (est.) | ~1,500 | ~800 | 4 | top-k softmax |
-| Interconnect (est.) | ~3,000 | ~2,000 | 0 | — |
-| **ORBIT-G1 total** | **~40,384** | **~23,680** | **~19** | |
+---
 
-### Fit on Arty A7-100T (82,800 LUT / 90 DSP / 135 BRAM36)
+## Test Results
+
+| Category | Tests | Status |
+|----------|-------|--------|
+| Python unit/integration | 208 | All pass |
+| RTL cocotb (module-level) | 24 | All pass |
+| Host-driven DUT (GEMM E2E) | 5 | All pass |
+| **Total** | **237** | **All pass** |
+
+### What the E2E test actually proves
+
+The `test_host_gemm_e2e` test runs this full path on real RTL:
 
 ```
-LUT      40,384 / 82,800  ████████████████████░░░░░░░░░░░░░░░░░░░░  48.8%  ✅
-FF       23,680 / 126,800 ████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  18.7%  ✅
-DSP48E1      19 / 90      ████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  21.1%  ✅
-BRAM36        6 / 135     ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   4.4%  ✅
+Python host stack
+  → descriptor pack (CRC-8)
+  → register staging (16 MMIO writes)
+  → doorbell ring
+  → desc_queue push
+  → priority arbiter (Q3>Q0>Q1>Q2)
+  → desc_fsm_v2 (CRC check + opcode validation)
+  → gemm_top dispatch
+  → gemm_core (DMA read act + wgt → MAC compute → DMA write result)
+  → completion IRQ
+  → trace ring event
+  → host reads IRQ + trace + clears fault
 ```
 
-**전체 ORBIT-G1이 Arty A7-100T에 49% LUT로 fit.** DSP 사용량은 80% 목표(72개) 대비 19개(26%)로 충분한 여유.
-
-> `gemm_int4_synth.sv` (원본) 는 DSP 1,040개를 사용해 FPGA에 들어가지 않음.
-> `gemm_int4_fpga.sv` 는 INT8×INT4 shift-and-add로 DSP를 4개로 줄인 FPGA 전용 버전.
-
----
-
-## ⚠️ Verification Status
-
-| Component | Simulation | Real Hardware |
-|-----------|-----------|---------------|
-| YUA-T16 GEMM tile (INT8) | ✅ cocotb PASS — bit-exact vs NumPy | ❌ Not verified |
-| VPU (RMSNorm / SiLU / RoPE / Softmax) | ✅ cocotb 8/8 PASS | ❌ Not verified |
-| KVC Controller (KV-Cache) | ✅ cocotb 4/4 PASS | ❌ Not verified |
-| MoE Router (top-k) | ✅ cocotb 3/3 PASS | ❌ Not verified |
-| INT4 GEMM (AWQ dequant) | ✅ cocotb 3/3 PASS | ❌ Not verified |
-| Full Transformer forward pass | ✅ integration test PASS | ❌ Not verified |
-
-**Simulation verification is complete. Real hardware verification (FPGA timing, power, memory bandwidth, thermal stability) has not been performed.**
-FPGA synthesis and board-level validation are the critical next step — contributions welcome.
-
----
-
-## What Is This
-
-**ORBIT-G1** is a PCIe accelerator architecture designed to execute large language model inference entirely in hardware. It uses an array of **YUA-T16** GEMM tiles plus purpose-built units for every operation in the Transformer forward pass.
-
-Target model: **GPT-OSS-20B** (MoE Transformer, 32 experts, Apache 2.0)
-Target platform: Arty A7-100T FPGA (prototype) → ASIC (long-term)
+All in one cocotb test. No mocks, no shortcuts — the Python host stack talks to the SystemVerilog DUT.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    ORBIT-G1 v2                       │
-│                                                      │
-│  PCIe Gen4 x16                                      │
-│  ┌─────────────────────────────────────────────┐    │
-│  │           Command Processor                  │    │
-│  │   Descriptor Queue × 4                      │    │
-│  └──────┬───────────┬────────────┬─────────────┘    │
-│         │           │            │                   │
-│  ┌──────▼──┐  ┌─────▼─────┐  ┌──▼──────────────┐   │
-│  │Compute  │  │    VPU    │  │  KVC + MoE      │   │
-│  │Clusters │  │(RMSNorm,  │  │  Controller     │   │
-│  │         │  │SiLU,RoPE, │  │                 │   │
-│  │N×YUA-T16│  │Softmax,   │  │ KV-Cache GDDR6  │   │
-│  │tiles    │  │Residual)  │  │ MoE Router      │   │
-│  │INT8/INT4│  │256-wide   │  │ top-k select    │   │
-│  └──────┬──┘  └─────┬─────┘  └──┬──────────────┘   │
-│         └───────────┴───────────┘                   │
-│                     │                               │
-│         ┌───────────▼──────────────┐                │
-│         │     Global Memory        │                │
-│         │  GDDR6 (16GB or 32GB)   │                │
-│         │  Weights + KV-Cache      │                │
-│         └──────────────────────────┘                │
-└─────────────────────────────────────────────────────┘
+Host Software (Python)
+  │
+  ├── OrbitDevice HAL
+  │     ├── connect / enqueue / poll / clear
+  │     └── Backend abstraction
+  │           ├── SimBackend (unit tests)
+  │           ├── CocotbBackend (RTL simulation)
+  │           └── MmapBackend (real hardware via PCIe BAR mmap)
+  │
+  ▼
+RTL (SystemVerilog)
+  │
+  ├── g2_protob_top ─────────── Proto-B top (PCIe + DMA + control)
+  │     ├── pcie_ep_versal ──── CPM PCIe Gen4 x8 adapter
+  │     ├── dma_bridge ──────── DMA submit/status state machine
+  │     └── g2_ctrl_top ─────── Proto-A control plane
+  │           ├── reg_top ───── 48 MMIO registers (REG_SPEC)
+  │           ├── desc_queue ── 4 descriptor queues + priority arbiter
+  │           ├── desc_fsm_v2 ─ CRC / timeout / opcode validation
+  │           ├── gemm_top ──── GEMM orchestrator
+  │           │     ├── ctrl_fsm
+  │           │     └── gemm_core (INT8 16×16 MAC array)
+  │           ├── oom_guard ─── 4-state memory pressure controller
+  │           ├── trace_ring ── 1K-entry debug event ring
+  │           ├── irq_ctrl ──── 12-source interrupt controller (W1C)
+  │           └── reset_seq ─── Reset sequencer (POR/SW/WDOG)
+  │
+  ▼
+FPGA (VCK190 / VC1902)
+  PCIe Gen4 x8 → BAR0 (1MB registers) + BAR4 (64KB DMA)
 ```
-
-### Inference execution: 21-step descriptor sequence
-
-One token decode pass through a single Transformer layer:
-
-```
-① DMA_2D       — load token embedding
-② GEMM_INT4    — QKV projection
-③ VECTOR_OP    — RoPE on Q, K
-④ KVC_WRITE    — store new K, V to cache
-⑤ KVC_READ     — fetch full sequence K, V
-⑥ GEMM_INT4    — Q @ K^T (attention scores)
-⑦ VECTOR_OP    — scale(1/√d) + softmax
-⑧ GEMM_INT4    — scores @ V
-⑨ GEMM_INT4    — output projection
-⑩ VECTOR_OP    — residual add
-⑪ VECTOR_OP    — RMSNorm
-⑫ GEMM_INT4    — MoE router logits
-⑬ MOE_ROUTE    — top-2 expert selection
-⑭ GEMM_INT4    — gate_proj (per expert)
-⑮ VECTOR_OP    — SiLU(gate) * up
-⑯ GEMM_INT4    — down_proj (per expert)
-⑰ VECTOR_OP    — expert weighted sum + residual
-⑱ BARRIER
-⑲ GEMM_INT4    — LM head projection
-⑳ VECTOR_OP    — softmax → argmax
-㉑ EVENT        — emit next token to host
-```
-
-All 21 steps verified end-to-end in `sim/integration/test_llm_forward.py`.
 
 ---
 
-## Repository Structure
+## Quick Start
+
+### Run tests (no hardware needed)
+
+```bash
+pip install pytest
+cd yua-t16
+python -m pytest tests/ -v
+# 208 passed
+```
+
+### Debug CLI
+
+```bash
+python -m tools.orbit_debug_protoa info
+python -m tools.orbit_debug_protoa queue-status
+python -m tools.orbit_debug_protoa tc-status
+python -m tools.orbit_debug_protoa irq
+python -m tools.orbit_debug_protoa trace-dump --count 16
+python -m tools.orbit_debug_protoa doorbell --queue 0 --opcode 0x01
+```
+
+### RTL co-simulation (needs verilator + cocotb)
+
+```bash
+pip install cocotb verilator
+# Host-driven GEMM E2E runs Python host stack against RTL DUT
+# See tb/tb_g2_ctrl_top_host_e2e.py
+```
+
+### Build FPGA bitstream (needs Vivado 2025.2)
+
+```bash
+cd fpga/vck190
+vivado -mode batch -source create_project.tcl
+# Configure CPM endpoint in Vivado GUI, then synthesize
+```
+
+---
+
+## Project Structure
 
 ```
 yua-t16/
-├── rtl/
-│   ├── mac_pe.sv           — Single INT8×INT8→INT32 MAC PE
-│   ├── mac_array.sv        — 16×16 MAC PE array
-│   ├── gemm_core.sv        — GEMM compute FSM + SRAM control
-│   ├── gemm_top.sv         — Top-level wrapper (descriptor interface)
-│   ├── ctrl_fsm.sv         — 64-byte descriptor decode FSM
-│   ├── act_sram.sv         — Activation SRAM
-│   ├── wgt_sram.sv         — Weight SRAM
-│   ├── vpu_core.sv         — 256-wide SIMD VPU (RMSNorm/SiLU/RoPE/Softmax/CLAMP)
-│   ├── kvc_core.sv         — KV-Cache controller (PagedAttention-style)
-│   ├── moe_router.sv       — MoE top-k router (numerically stable softmax)
-│   └── gemm_int4.sv        — INT4 weight GEMM with AWQ FP16 dequantization
-├── sim/
-│   ├── cocotb/             — cocotb testbenches (Icarus Verilog 12)
-│   │   ├── test_gemm_top.py
-│   │   ├── test_mac_array.py
-│   │   ├── test_vpu.py
-│   │   ├── test_kvc.py
-│   │   ├── test_moe.py
-│   │   └── test_gemm_int4.py
-│   ├── integration/
-│   │   └── test_llm_forward.py  — Full Transformer layer forward pass
-│   └── golden/             — NumPy reference models
-└── spec/
-    ├── yua-t16.md          — YUA-T16 GEMM tile specification
-    ├── yua-t16-v2.md       — YUA-T16 v2 (INT4 extension)
-    ├── orbit-g1.md         — ORBIT-G1 system architecture
-    ├── descriptor.md       — Descriptor format specification
-    ├── vpu.md              — VPU design specification
-    ├── kvc.md              — KV-Cache controller specification
-    └── yua-llm-hw-design.md — Full LLM hardware design doc
+├── rtl/                       # 23 SystemVerilog modules
+│   ├── g2_protob_top.sv       #   Proto-B top (PCIe + control)
+│   ├── g2_ctrl_top.sv         #   Proto-A control plane
+│   ├── pcie_ep_versal.sv      #   PCIe endpoint (CPM adapter)
+│   ├── dma_bridge.sv          #   DMA state machine
+│   ├── reg_top.sv             #   48-register MMIO bank
+│   ├── desc_queue.sv          #   4-queue ring buffer
+│   ├── desc_fsm_v2.sv         #   Descriptor validator
+│   ├── gemm_top.sv            #   GEMM orchestrator
+│   ├── gemm_core.sv           #   INT8 16x16 MAC + DMA
+│   ├── oom_guard.sv           #   Memory pressure controller
+│   ├── trace_ring.sv          #   Debug trace ring
+│   ├── irq_ctrl.sv            #   Interrupt controller
+│   ├── reset_seq.sv           #   Reset sequencer
+│   ├── cdc_fifo.sv            #   Async FIFO
+│   └── ...                    #   mac_array, mac_pe, kvc_core, etc.
+│
+├── tb/                        # 9 cocotb testbenches, 29 tests
+│   ├── tb_g2_ctrl_top_host_e2e.py  # Host-driven GEMM E2E
+│   ├── dma_responder.py            # DMA test memory model
+│   └── ...
+│
+├── tools/                     # Python host stack (14 modules)
+│   ├── orbit_device.py        #   Device HAL
+│   ├── orbit_mmio_map.py      #   Register map SSOT
+│   ├── orbit_desc.py          #   Descriptor packer + CRC
+│   ├── orbit_scheduler.py     #   Op scheduler
+│   ├── orbit_debug_protoa.py  #   Debug CLI
+│   └── ...
+│
+├── tests/                     # 16 test files, 208 tests
+├── fpga/vck190/               # Vivado project + Tcl scripts
+├── scripts/                   # Board smoke test
+└── docs/                      # 15 design documents
 ```
 
 ---
 
-## Running the Simulations
+## Register Map
 
-### Prerequisites
+48 registers across 11 blocks. All addresses in [`tools/orbit_mmio_map.py`](tools/orbit_mmio_map.py).
 
-```bash
-# Icarus Verilog (simulator)
-sudo apt install iverilog        # Ubuntu/Debian
-brew install icarus-verilog      # macOS
-
-# Python dependencies
-python -m venv .venv
-source .venv/bin/activate
-pip install cocotb cocotb-test pytest numpy
-```
-
-### Run individual component tests
-
-```bash
-cd /path/to/yua-t16
-source .venv/bin/activate
-
-python sim/cocotb/run_gemm_top.py    # GEMM tile
-python sim/cocotb/run_vpu.py         # VPU (8 tests)
-python sim/cocotb/run_kvc.py         # KV-Cache controller
-python sim/cocotb/run_moe.py         # MoE router
-python sim/cocotb/run_gemm_int4.py   # INT4 GEMM
-```
-
-### Run integration test
-
-```bash
-python sim/integration/test_llm_forward.py
-```
-
-Expected output:
-```
-[PASS] test_qkv_attention    — Q/K/V projection + RoPE + attention + output projection
-[PASS] test_moe_ffn          — RMSNorm + MoE routing + expert FFN + residual
-[PASS] test_full_forward     — Full 21-step descriptor sequence, next_token=204
-```
+| Block | Key Registers |
+|-------|--------------|
+| Global | G2_ID (`0x47320001`), VERSION, CAP0 |
+| Reset | BOOT_CAUSE, SW_RESET, WDOG_CTRL |
+| Queue | Q0-Q3 DOORBELL, STATUS, OVERFLOW (W1C) |
+| DMA | SUBMIT_LO/HI, CTRL, STATUS, ERR_CODE |
+| OOM | USAGE, RESERVED, STATE (NORMAL/PRESSURE/CRITICAL/EMERG) |
+| TC0 | RUNSTATE (IDLE/FETCH/RUN/FAULT), CTRL, FAULT_STATUS |
+| Perf | MXU_BUSY_CYCLES, TILE_COUNT, FREEZE |
+| IRQ | PENDING (W1C, set-wins), MASK, FORCE, CAUSE_LAST |
+| Trace | HEAD, TAIL, CTRL + 1K-entry read window |
 
 ---
 
-## Design Decisions
+## Status
 
-### Icarus Verilog 12 compatibility
-All behavioral RTL avoids known Icarus 12 bugs:
-- No dynamic bit-selects inside `always` blocks — use `generate/assign` outside
-- No `real` variables with non-blocking assignments in `always_ff`
-- All behavioral models use `always @(posedge clk)` with blocking assignments
-
-### FP16 arithmetic
-VPU and INT4 GEMM use IEEE 754 FP16 throughout, implemented in software-style `real` arithmetic for behavioral simulation. Synthesizable RTL (Q8.8 fixed-point) is in `rtl/vpu_core_synth.sv` (WIP).
-
-### Descriptor-driven execution
-All compute is initiated via 64-byte descriptors submitted to a command queue. This decouples the software scheduler from hardware execution and enables pipelining across descriptor types.
-
----
-
-## What Needs Hardware Verification
-
-The following have **not** been measured on real hardware:
-
-- **Timing closure** — whether 150 MHz target is achievable on Arty A7-100T
-- **Resource utilization** — LUT/DSP/BRAM fit within xc7a100t
-- **Power consumption** — estimated, not measured
-- **Memory bandwidth** — GDDR6 throughput vs actual token/s
-- **Long-term stability** — thermal behavior, error rate under sustained load
-
-**If you have an FPGA board (Arty A7, Nexys A7, or similar Xilinx 7-series), FPGA synthesis contributions are the highest priority need.**
-
----
-
-## Roadmap
-
-```
-[DONE] Phase A — Behavioral RTL + simulation
-  ✅ YUA-T16 GEMM tile
-  ✅ VPU (all elementwise ops)
-  ✅ KVC Controller
-  ✅ MoE Router
-  ✅ INT4 GEMM (AWQ)
-  ✅ Full LLM forward pass integration test
-
-[DONE] Phase B — Synthesizable RTL
-  ✅ vpu_core_synth.sv (Q8.8 fixed-point, LUT-based LUTs, 9/9 cocotb PASS)
-  ✅ gemm_int4_fpga.sv (DSP 1040→4, fits Arty A7-100T)
-  ✅ Yosys synthesis report — 49% LUT, 21% DSP on xc7a100t
-  ⏳ Vivado P&R + timing closure at 150 MHz (scripts/vivado_synth.tcl ready)
-
-[TODO] Phase C — FPGA board validation
-  ⏳ Arty A7-100T bitstream
-  ⏳ PCIe DMA test
-  ⏳ Token throughput measurement
-
-[TODO] Phase D — Software stack
-  ⏳ Linux kernel PCIe driver
-  ⏳ Userspace runtime library (C++)
-  ⏳ OpenAI-compatible inference server
-```
-
----
-
-## Contributing
-
-Highest-priority contributions:
-
-1. **FPGA synthesis** — port behavioral RTL to synthesizable, run Vivado, report utilization/timing
-2. **PCIe driver skeleton** — Linux kernel driver for descriptor queue submission
-3. **Softmax/exp LUT** — fixed-point exp() approximation for VPU synthesis
-4. **Bug reports** — if simulation tests fail on your setup, open an issue with Icarus version + OS
-
----
-
-## Specification Documents
-
-Full design documentation in `spec/`:
-
-- [`spec/orbit-g1.md`](spec/orbit-g1.md) — System architecture
-- [`spec/yua-llm-hw-design.md`](spec/yua-llm-hw-design.md) — LLM inference hardware design (GPT-OSS-20B mapping)
-- [`spec/descriptor.md`](spec/descriptor.md) — Descriptor format v1/v2
-- [`spec/vpu.md`](spec/vpu.md) — VPU design
-- [`spec/kvc.md`](spec/kvc.md) — KV-Cache controller design
+| Milestone | Status |
+|-----------|--------|
+| RTL skeleton (7 new modules) | Done |
+| Control plane integration | Done |
+| MMIO device contract (48 registers) | Done |
+| Python host stack + CLI | Done |
+| Host-driven RTL co-simulation | Done — GEMM E2E proven |
+| Proto-B PCIe/DMA contract | Done |
+| Linux MMIO open path | Done |
+| VCK190 Vivado project + CPM config | Done |
+| **Bitstream (PDI) generated** | **Done** — 0 errors |
+| Connect RTL to CPM Block Design | Next |
+| VCK190 board bring-up | Needs board |
 
 ---
 
@@ -295,5 +210,4 @@ MIT
 
 ---
 
-*ORBIT-G1 is an independent open-source hardware project. Not affiliated with any commercial chip vendor.*
-*Simulation-verified. Real hardware verification pending.*
+*Built by YUA AI. Simulation-verified, bitstream-generated, awaiting silicon.*

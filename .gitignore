@@ -5,3 +5,10 @@ sim_build/
 *.vcd
 *.fst
 .venv/
+build/
+docs/
+.Xil/
+*.jou
+*.log
+*.str
+*.pb
