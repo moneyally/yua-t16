@@ -148,8 +148,12 @@ module g3_ctrl_top (
   );
 
   // ═══════════════════════════════════════════════════════════
-  // MXU command output
+  // MXU command output — from register path (debug/direct launch)
   // ═══════════════════════════════════════════════════════════
+  // When g3_desc_fsm is active, it takes over MXU dispatch.
+  // Register-direct path is available when FSM is idle.
+  // For now: register path only (FSM instantiation is a hook below).
+
   assign mxu_cmd_valid = mxu_cmd_valid_r;
   assign mxu_cmd       = mxu_cmd_r;
   assign mxu_cfg0      = mxu_cfg0_r;
@@ -159,12 +163,36 @@ module g3_ctrl_top (
   assign mxu_out_addr  = mxu_out_addr_r;
 
   // ═══════════════════════════════════════════════════════════
-  // IRQ stub (no real IRQ sources yet in G3 skeleton)
+  // g3_desc_fsm hook (G3-RTL-005)
+  // ═══════════════════════════════════════════════════════════
+  // FSM is instantiated but descriptor ingress is a placeholder.
+  // In full integration: desc_queue pop → g3_desc_fsm → MXU/GEMM dispatch.
+  // For now: FSM ports are declared for future top-level wiring.
+  //
+  // g3_desc_fsm u_g3_fsm (
+  //   .clk(clk), .rst_n(rst_n),
+  //   .desc_valid(/* future queue pop */),
+  //   .desc_bytes(/* future hold register */),
+  //   .desc_ready(/* future */),
+  //   .queue_class(2'd0),
+  //   .mxu_cmd_valid(/* mux with reg path */),
+  //   .mxu_cmd_ready(1'b1),
+  //   .mxu_cfg0(), .mxu_cfg1(),
+  //   .mxu_act_addr(), .mxu_wgt_addr(), .mxu_out_addr(),
+  //   .gemm_cmd_valid(), .gemm_cmd_ready(1'b1),
+  //   .gemm_act_addr(), .gemm_wgt_addr(), .gemm_out_addr(), .gemm_Kt(),
+  //   .bkwd_cmd_valid(), .opt_cmd_valid(), .coll_cmd_valid(),
+  //   .core_done(1'b0),
+  //   .timeout_cycles(32'd100_000),
+  //   .fault_valid(), .fault_code(),
+  //   .busy(), .done_pulse(),
+  //   .current_opcode(), .current_qclass()
+  // );
+
+  // ═══════════════════════════════════════════════════════════
+  // IRQ stub
   // ═══════════════════════════════════════════════════════════
   assign irq_out = 1'b0;
-
-  // TODO: future desc_fsm ingress (G3-RTL-005)
-  // TODO: future backward/optimizer/collective engine connections
 
 endmodule
 
