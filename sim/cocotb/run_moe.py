@@ -11,7 +11,7 @@ def main() -> None:
     sim_dir   = root / "sim" / "cocotb"
     build_dir = root / "sim_build" / "moe_router"
 
-    verilog_sources = [str(root / "rtl" / "moe_router.sv")]
+    verilog_sources = [str(root / "rtl" / "behavioral" / "moe_router.sv")]
 
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
     os.environ.setdefault("COCOTB_LOG_LEVEL", "INFO")

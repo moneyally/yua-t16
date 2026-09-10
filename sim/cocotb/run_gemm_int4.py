@@ -22,7 +22,7 @@ def main() -> None:
     build_dir = root / "sim_build" / "gemm_int4"
 
     verilog_sources = [
-        root / "rtl" / "gemm_int4.sv",
+        root / "rtl" / "behavioral" / "gemm_int4.sv",
     ]
 
     missing = [p for p in verilog_sources if not p.exists()]
