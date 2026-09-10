@@ -6,7 +6,6 @@ sim_build/
 *.fst
 .venv/
 build/
-docs/
 .Xil/
 *.jou
 *.log

@@ -1,0 +1,77 @@
+# CLAUDE.md — yua-t16 / ORBIT 작업 규칙
+
+이 파일은 이 레포에서 작업하는 모든 Claude Code 세션이 먼저 읽는다.
+사용자(정원)는 낮에 폰으로 짧은 지시를 보내고, 저녁에 결과를 검증한다.
+따라서 이 문서의 규칙은 "지시가 짧아도 방향이 흔들리지 않게" 하기 위한 것이다.
+
+## 0. 북극성 (바뀌지 않는 방향)
+
+이 레포의 장기 목표는 **상태 고정(state-stationary) AI 추론 유닛**이다.
+- 가중치가 아니라 **세션별 상태 행렬**이 연산기 옆 SRAM에 상주하고, 토큰이 지나가며 그 상태를 제자리에서 갱신한다.
+- 첫 목표물은 **델타룰(Gated DeltaNet 계열) 헤드 1개**를 FPGA에서 돌리는 것이다.
+- 기존 `mac_array.sv`(외적 누산)가 그 갱신 유닛의 핵심이다. 새로 만들지 말고 진화시킨다.
+- 상세는 `docs/DESIGN.md`, 일정은 `docs/PLAN.md`.
+
+"GPU급", "프론티어 모델", "학습 지원" 같은 목표는 이 레포의 범위가 아니다. README나 문서에 그런 표현을 쓰지 않는다.
+
+## 1. 절대 규칙 (어기면 그 커밋은 되돌린다)
+
+1. **합성 가능성이 정답이다.** 모든 RTL 모듈은 `yosys -p "read_verilog -sv <files>; synth -top <module>"` 이 에러 없이 통과해야 한다. `real`, `$itor`, `$rtoi`, `$exp`, `$sqrt`, `#delay`, `initial` 로직(시뮬레이션 전용 `ifdef COCOTB_SIM` 제외)은 합성 대상 RTL에 금지한다.
+2. **테스트는 RTL 바깥의 정답과 비교한다.** cocotb 테스트의 기대값은 `sim/golden/`의 numpy 모델에서 나와야 한다. RTL 내부 함수를 참조 모델로 쓰는 테스트는 테스트가 아니다. 새 테스트마다 "기대값의 출처"를 docstring 첫 줄에 적는다.
+3. **완료 주장에는 명령 출력이 붙는다.** "테스트 통과"라고 쓰지 않는다. 실행한 명령과 마지막 20줄 출력을 그대로 보고에 붙인다. 실행하지 못했으면 "실행 못 함"이라고 쓴다.
+4. **비용 0.** 클라우드, 유료 API, 유료 툴을 추가하지 않는다. 툴체인은 verilator, iverilog, yosys, cocotb, Vivado(무료 에디션 범위)로 한정한다. 새 의존성은 이유를 적고 사용자 승인 후에 추가한다.
+5. **한 번에 하나.** `docs/PLAN.md`의 현재 주차 작업만 한다. 다음 주차 작업이 눈에 보여도 시작하지 않는다. 새 최상위 모듈, 새 폴더, 새 서브프로젝트는 PLAN에 있는 것만 만든다.
+6. **범위 축소가 기본 동작이다.** 막히면 기능을 추가해서 우회하지 않고, 범위를 줄여서 끝낸다. 예: 64×64가 안 되면 16×16으로 줄여 끝내고 보고한다.
+7. **모르면 모른다고 쓴다.** 타이밍, 면적, 보드 동작처럼 실제로 돌려보지 않은 것은 "추정" 또는 "미검증"이라고 표시한다.
+8. **README는 현재 상태만 말한다.** 계획·희망·목표는 `docs/PLAN.md`에만 쓴다.
+
+## 2. 레포 현재 상태 (2026-09 기준, 외부 검토 결과)
+
+잘 된 것:
+- 제어 평면: `reg_top`, `desc_queue`, `desc_fsm_v2`, `irq_ctrl`, `trace_ring`, `reset_seq`, `cdc_fifo` — 구조 양호, 호스트 스택(`tools/`)과 cocotb E2E 연결됨.
+- `mac_pe`, `mac_array`: 16×16 INT8 출력 고정 외적 누산. 합성 가능. **이것이 북극성의 핵심 부품이다.**
+- `spec/`의 SSOT 규율, `tools/orbit_mmio_map.py` 레지스터맵 단일 소스.
+
+고쳐야 하는 것 (우선순위 순):
+- **`real` 타입 사용 모듈 7개 — 합성 불가.** `collective_engine.sv`, `gemm_int4.sv`, `loss_scaler.sv`, `moe_router.sv`, `optimizer_unit.sv`, `vpu_core.sv`, `vpu_fp16_utils.sv`. 이들에 의존하는 G3 학습 경로(`backward_engine` 제외)는 하드웨어가 아니라 행동 모델이다.
+- `pcie_ep_versal.sv`: CPM AXI-Stream 포트가 스텁. 비트스트림은 생성됐지만 호스트와 통신한 적 없음.
+- 외부 메모리(DDR/HBM) 경로 없음. `dma_bridge`는 상태머신이고 실제 메모리 인터페이스가 아님.
+- `mxu_bf16_128x128`은 16×16 타일 1개를 64회 반복 — 연산기 수는 256개. 이름이 실체보다 크다.
+- README가 "MPW ready", "training" 등 현재 상태를 과장함.
+- `done_pulse` 관련 미해결 버그 존재 (파형으로 확인 필요).
+
+## 3. 작업 방식
+
+- 세션 시작 시: `git status`, `git log --oneline -5`, `docs/PLAN.md`의 "현재 주차" 섹션을 읽고, 오늘 할 일 1~3개를 먼저 적는다.
+- 커밋은 작게, 메시지는 `<영역>: <무엇을> — <검증 명령>` 형식. 예: `rtl: move real-typed modules to rtl/behavioral — yosys synth of rtl/*.sv passes`
+- 세션 종료 시 `docs/LOG.md`에 5줄 이내로 추가: 한 것 / 안 된 것 / 실행한 검증 명령 / 다음 세션 첫 작업 / 사용자 결정이 필요한 것.
+- 사용자에게 질문이 필요하면 작업을 멈추지 말고, 가장 보수적인 선택으로 진행한 뒤 LOG의 "결정 필요"에 적는다.
+
+## 4. 검증 명령 모음
+
+```bash
+# 합성 가능성 게이트 (모든 합성 대상 RTL)
+yosys -q -p "read_verilog -sv rtl/*.sv; hierarchy -check; synth" 2>&1 | tail -20
+
+# 린트
+verilator --lint-only -Wall -Irtl rtl/<module>.sv
+
+# 합성 대상 RTL에 금지 토큰이 있는지
+grep -nE '\breal\b|\$itor|\$rtoi|\$exp\b|\$sqrt|#[0-9]' rtl/*.sv | grep -v '^\s*//' || echo "clean"
+
+# 호스트 스택 테스트
+python -m pytest tests/ -q
+
+# cocotb (예)
+cd tb && make SIM=verilator TOPLEVEL=<module> MODULE=tb_<module>
+```
+
+## 5. 저녁 검증 체크리스트 (사용자용)
+
+Claude Code의 보고를 읽을 때 이 순서로 확인한다. 하나라도 "아니오"면 그 작업은 미완료다.
+1. 보고에 실제 명령 출력이 붙어 있는가? (없으면 미완료)
+2. yosys 합성 게이트가 통과했는가? (RTL을 건드린 날은 필수)
+3. 새 테스트의 기대값이 `sim/golden/`에서 왔는가? (테스트 파일 첫 줄 확인)
+4. 오늘 만든 것이 PLAN의 현재 주차 항목인가? (아니면 되돌린다)
+5. LOG.md에 "안 된 것"이 정직하게 적혀 있는가? (전부 됐다는 보고는 의심한다)
+6. 이해 안 되는 코드 한 덩어리를 골라 "이 줄이 왜 필요한지 설명해"라고 물어본다. (하루 1회, 학습용)
