@@ -265,9 +265,12 @@ module g3_desc_fsm #(
   logic [7:0] fault_code_r;
   logic       fault_valid_r;
 
+  // NOTE: fault_code_r 는 아래 fault code latch always_ff 하나에서만 구동한다.
+  // 여기서도 리셋하면 같은 변수를 두 always_ff 가 구동하는 다중 드라이버가 된다
+  // (rtl/desc_fsm_v2.sv 와 같은 버그였다). scripts/synth_gate.sh STAGE 1 이
+  // "multiple conflicting drivers for g3_desc_fsm.\fault_code_r" 로 잡아냈다.
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      fault_code_r  <= 8'h00;
       fault_valid_r <= 1'b0;
     end else begin
       if (state == ST_FAULT)

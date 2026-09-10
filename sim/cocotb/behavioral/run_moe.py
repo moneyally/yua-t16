@@ -1,17 +1,17 @@
-"""run_vpu.py — cocotb runner for vpu_core (DEPTH=256)"""
+"""run_moe.py — cocotb runner for moe_router"""
 from __future__ import annotations
 import os, sys, shutil
 from pathlib import Path
 
 def project_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return Path(__file__).resolve().parents[3]
 
 def main() -> None:
     root      = project_root()
-    sim_dir   = root / "sim" / "cocotb"
-    build_dir = root / "sim_build" / "vpu_core"
+    sim_dir   = root / "sim" / "cocotb" / "behavioral"
+    build_dir = root / "sim_build" / "moe_router"
 
-    verilog_sources = [str(root / "rtl" / "behavioral" / "vpu_core.sv")]
+    verilog_sources = [str(root / "rtl" / "behavioral" / "moe_router.sv")]
 
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
     os.environ.setdefault("COCOTB_LOG_LEVEL", "INFO")
@@ -25,8 +25,8 @@ def main() -> None:
     from cocotb_test.simulator import run
     run(
         simulator="icarus",
-        toplevel="vpu_core",
-        module="test_vpu",
+        toplevel="moe_router",
+        module="test_moe",
         python_search=[str(sim_dir)],
         verilog_sources=verilog_sources,
         compile_args=["-g2012", "-DCOCOTB_SIM=1"],

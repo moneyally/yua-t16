@@ -235,14 +235,18 @@ module desc_fsm_v2 #(
   logic [7:0] fault_code_r;
   logic       fault_valid_r;
 
+  // NOTE: fault_code_r 는 아래 "Fault code latch" always_ff 하나에서만 구동한다.
+  // 예전에는 이 블록도 리셋 시 fault_code_r <= 0 을 했는데, 그러면 같은 변수를
+  // 두 개의 always_ff 가 구동하는 다중 드라이버가 된다. yosys 가
+  // "multiple conflicting drivers for desc_fsm_v2.\fault_code_r" 로 잡아냈고
+  // (scripts/synth_gate.sh STAGE 1), Vivado·verilator 도 MULTIDRIVEN 으로 거부한다.
+  // 시뮬레이션에서는 우연히 동작해서 기존 테스트가 전부 통과했다.
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      fault_code_r  <= 8'h00;
       fault_valid_r <= 1'b0;
     end else begin
       if (state == ST_FAULT) begin
         fault_valid_r <= 1'b1;
-        // fault_code_r is set in state_n logic
       end else if (state == ST_IDLE) begin
         fault_valid_r <= 1'b0;
       end

@@ -13,12 +13,12 @@ from cocotb_test.simulator import run
 
 
 def project_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return Path(__file__).resolve().parents[3]
 
 
 def main() -> None:
     root = project_root()
-    sim_dir = root / "sim" / "cocotb"
+    sim_dir = root / "sim" / "cocotb" / "behavioral"
     build_dir = root / "sim_build" / "gemm_int4"
 
     verilog_sources = [

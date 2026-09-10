@@ -293,21 +293,42 @@ end
     logic [31:0] t;
     begin
       t = v;
-// FIX v0.2: X는 항상 0으로 클리핑
+// X 클리핑은 **시뮬레이션 전용**이다 — `===` 는 합성 가능한 연산자가 아니고,
+// 합성 대상에 남기면 yosys 가 조건을 상수 1 로 접어 출력 경로를 0 으로 만든다.
+// (측정: gemm_core 1,523 cells → 가드 제거 시 34,735 cells. docs/BUGS.md BUG-006)
+`ifdef COCOTB_SIM
       if ((^t === 1'bx)) x32 = 32'd0;
       else              x32 = t;
+`else
+      x32 = t;
+`endif
 
     end
   endfunction
 
+  // NOTE: x32() is deliberately NOT called from inside pack4().
+  // yosys (0.33 and 0.69) rejects a function call nested inside another
+  // function's expression with "Non-constant function call in constant
+  // expression", which blocked scripts/synth_gate.sh. The X-clipping is
+  // inlined instead — same behaviour, one less nesting level.
+  // x32() is kept because it is still used elsewhere in this module.
   function automatic logic [127:0] pack4(input int base);
+    logic [31:0] w0, w1, w2, w3;
     begin
+      w0 = acc_out_lat[base+0];
+      w1 = acc_out_lat[base+1];
+      w2 = acc_out_lat[base+2];
+      w3 = acc_out_lat[base+3];
+`ifdef COCOTB_SIM
       pack4 = {
-        x32(acc_out_lat[base+3]),
-        x32(acc_out_lat[base+2]),
-        x32(acc_out_lat[base+1]),
-        x32(acc_out_lat[base+0])
+        ((^w3 === 1'bx) ? 32'd0 : w3),
+        ((^w2 === 1'bx) ? 32'd0 : w2),
+        ((^w1 === 1'bx) ? 32'd0 : w1),
+        ((^w0 === 1'bx) ? 32'd0 : w0)
       };
+`else
+      pack4 = {w3, w2, w1, w0};
+`endif
     end
   endfunction
 

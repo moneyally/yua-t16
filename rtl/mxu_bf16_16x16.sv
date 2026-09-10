@@ -115,6 +115,7 @@ module mxu_bf16_16x16 #(
     logic [22:0] a_m, b_m, r_m;
     logic [24:0] a_full, b_full;
     logic [25:0] sum;
+    int          norm_i;
 
     a_s = a[31]; a_e = a[30:23]; a_m = a[22:0];
     b_s = b[31]; b_e = b[30:23]; b_m = b[22:0];
@@ -173,9 +174,18 @@ module mxu_bf16_16x16 #(
       sum = sum >> 1;
       r_e = r_e + 1;
     end else begin
-      while (!sum[24] && r_e > 0) begin
-        sum = sum << 1;
-        r_e = r_e - 1;
+      // 정규화 시프트. 원래는 `while (!sum[24] && r_e > 0)` 였는데,
+      // 함수 안의 경계 없는 while 은 하드웨어가 아니다 — yosys 는
+      // "Function fp32_add can only be called with constant arguments" 로
+      // 거부하고(0.33·0.69 동일) scripts/synth_gate.sh 가 여기서 막혔다.
+      // sum 은 26비트이고 이 분기는 sum!=0 && !sum[25] 일 때만 오므로
+      // 선두 1 은 [24:0] 안에 있다 → 최대 24회 시프트. 경계 25 는 안전하다.
+      // 조건이 거짓이 되면 이후 반복은 아무것도 하지 않으므로 동작은 동일하다.
+      for (norm_i = 0; norm_i < 25; norm_i = norm_i + 1) begin
+        if (!sum[24] && r_e > 0) begin
+          sum = sum << 1;
+          r_e = r_e - 1;
+        end
       end
     end
 

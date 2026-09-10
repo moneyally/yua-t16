@@ -22,8 +22,17 @@ module wgt_sram #(
   logic [127:0] mem [0:MAX_KT-1];
   integer i;
 
+  // X 주소 가드는 **시뮬레이션 전용**이다.
+  // `===` 는 합성 가능한 연산자가 아니다. 가드를 그대로 두면 yosys 가
+  // has_x_addr 를 상수 1 로 접어버려서 `we && !has_x_addr(...)` 가 항상 거짓이 되고,
+  // **wgt_sram 전체가 합성에서 사라진다** (측정: 0 cells vs 가드 제거 시 99,294 cells).
+  // docs/BUGS.md BUG-006 참조. COCOTB_SIM 밖에서는 상수 0 이어야 한다.
   function automatic logic has_x_addr(input logic [AW-1:0] a);
+`ifdef COCOTB_SIM
     has_x_addr = (^a === 1'bx);
+`else
+    has_x_addr = 1'b0;
+`endif
   endfunction
 
 `ifdef COCOTB_SIM

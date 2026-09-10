@@ -5,15 +5,15 @@ from pathlib import Path
 
 
 def project_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return Path(__file__).resolve().parents[3]
 
 
 def main() -> None:
     root      = project_root()
-    sim_dir   = root / "sim" / "cocotb"
+    sim_dir = root / "sim" / "cocotb" / "behavioral"
     build_dir = root / "sim_build" / "kvc_core"
 
-    verilog_sources = [str(root / "rtl" / "kvc_core.sv")]
+    verilog_sources = [str(root / "rtl" / "behavioral" / "kvc_core.sv")]
 
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
     os.environ.setdefault("COCOTB_LOG_LEVEL", "INFO")

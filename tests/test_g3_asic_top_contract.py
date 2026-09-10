@@ -7,7 +7,11 @@ import pytest
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-TOP_PATH = os.path.join(os.path.dirname(__file__), "..", "rtl", "g3_asic_top.sv")
+# g3_asic_top.sv was moved to rtl/behavioral/ on 2026-09-10 (PLAN W1-1):
+# it instantiates `g3_reg_top`, a module that does not exist anywhere in the
+# repo (docs/AUDIT.md section 2), so it cannot elaborate and is not a
+# synthesis target. These are source-text contract checks, not RTL runs.
+TOP_PATH = os.path.join(os.path.dirname(__file__), "..", "rtl", "behavioral", "g3_asic_top.sv")
 
 
 @pytest.fixture

@@ -13,19 +13,6 @@ module cdc_fifo #(
   parameter int DATA_W = 32,
   parameter int DEPTH  = 16    // must be power of 2, minimum 4
 )(
-  // Static constraint: DEPTH must be >= 4.
-  // DEPTH=2 causes negative bit-select in gray-code full comparison
-  // (rd_gray_sync2[PTR_W-3:0] where PTR_W=2 → index -1).
-  initial begin
-    if (DEPTH < 4) begin
-      $error("cdc_fifo: DEPTH must be >= 4 (got %0d). DEPTH=2 causes gray full comparison bug.", DEPTH);
-      $finish;
-    end
-    if ((DEPTH & (DEPTH - 1)) != 0) begin
-      $error("cdc_fifo: DEPTH must be power of 2 (got %0d).", DEPTH);
-      $finish;
-    end
-  end
   // Write domain
   input  logic              wr_clk,
   input  logic              wr_rst_n,
@@ -42,6 +29,32 @@ module cdc_fifo #(
   output logic [DATA_W-1:0] rd_data,
   output logic              empty
 );
+
+  // ---------------------------------------------------------------
+  // Static parameter constraints.
+  // DEPTH must be >= 4: DEPTH=2 makes PTR_W=2, so the gray-code full
+  // comparison indexes rd_gray_sync2[PTR_W-3:0] = [-1:0] → negative bit-select.
+  // DEPTH must be a power of 2 for gray-code pointer wrapping to be correct.
+  //
+  // This block previously sat INSIDE the port list, which is illegal
+  // SystemVerilog — iverilog and sv2v both reject it, so this module had
+  // never compiled. Moved into the module body and guarded per CLAUDE.md
+  // rule 1 (`initial` is banned in synthesis RTL except under COCOTB_SIM).
+  // TODO: add an equivalent elaboration-time check for Vivado.
+  // ---------------------------------------------------------------
+`ifdef COCOTB_SIM
+  initial begin
+    if (DEPTH < 4) begin
+      $error("cdc_fifo: DEPTH must be >= 4 (got %0d). DEPTH=2 causes gray full comparison bug.", DEPTH);
+      $finish;
+    end
+    if ((DEPTH & (DEPTH - 1)) != 0) begin
+      $error("cdc_fifo: DEPTH must be power of 2 (got %0d).", DEPTH);
+      $finish;
+    end
+  end
+`endif
+
 
   localparam int ADDR_W = $clog2(DEPTH);
   localparam int PTR_W  = ADDR_W + 1;  // extra MSB for wrap detection
