@@ -2,6 +2,235 @@
 
 ---
 
+## 2026-09-10 (세션 2, 자율모드) — W1-1 완료 + W1-2 게이트 + W2-2 준비
+
+**한 것**: 승인 6건 전부 실행. `scripts/synth_gate.sh` (2단 게이트) 세워서 **통과**. W2-2 가설을 테스트로 만들어 **BUG-001 확정** (파형·사이클표 확보). 게이트가 추가로 합성 결함 5개를 잡아냈고 그중 4개 수정.
+**안 된 것**: `mxu_bf16_16x16` 등 7개 모듈은 yosys 가 시간 예산 안에 못 끝냄(**합성 불가가 아니라 미측정**). 기존 `tb/` 테스트벤치 대부분은 여전히 실행 못 함 (아래 "남은 문제" 참조). `verilator` 5.020(Debian)은 cocotb 2.x 와 비호환.
+**실행한 검증 명령**: `bash scripts/synth_gate.sh` → **PASS (EXIT=0)** / `python3 -m pytest tests/ -q` → **3 failed, 247 passed, 5 xfailed** / `python3 tb/run_tb.py g2_ctrl_top tb_g2_ctrl_top_fault_irq` → 3 tests, 1 pass 2 fail(=버그 확정)
+**다음 세션 첫 작업**: BUG-001 수정 방향 결정 → `docs/DESIGN.md` 9절 먼저 고치고 → RTL. 그 다음 W1-3 (verilator 린트 → `docs/LINT.md`).
+**사용자 결정 필요**: 4건 (아래 "결정 필요 v2").
+
+---
+
+### 승인 6건 처리 결과
+
+| # | 지시 | 결과 |
+|---|---|---|
+| 1 | synth_gate 는 sv2v 전처리, "일일 게이트 / 최종은 Vivado" 주석 | ✅ `scripts/synth_gate.sh` 헤더에 명시. STAGE 2 끝에도 매번 출력. |
+| 2 | `sim/cocotb` 행동모델 3파일 → `sim/cocotb/behavioral/` | ✅ + 러너 경로 수정. `test_kvc`/`run_kvc` 도 같이 이동 (아래 참조). |
+| 3 | README 는 W2-1 에서 | ✅ 손대지 않음. |
+| 4 | `g3_asic_top`, `g3_ctrl_top` → behavioral | ✅ + `tests/test_g3_asic_top_contract.py` 경로 갱신 (소스 텍스트 계약 테스트라 여전히 통과). |
+| 5 | pytest CPM 실패 5건 xfail(reason 명시), 기대값 수정 금지 | ✅ `strict=True` 로. 기대값 그대로. **문서 3건은 손대지 않고 그대로 실패로 남겼다** (아래 결정 필요 #4). |
+| 6 | CLAUDE.md 2절 README 항목 교체 | ✅ "237 all pass"·"CPM config Done" 등 감사 결과로 교체. `real` 7개 항목도 W1-1 완료 상태로 갱신. |
+
+### W1-2 — `scripts/synth_gate.sh`
+
+**왜 2단인가**: 전 모듈 full `synth` 는 일일 게이트로 못 쓴다 (`mxu_bf16_16x16` 20분+, `act_sram` 64s).
+
+- **STAGE 1 (elaborate + `check -assert`)**: 전 모듈, 모듈당 120s, 병렬 4. **에러는 게이트 실패.** 진짜 회귀는 거의 전부 여기서 잡힌다.
+- **STAGE 2 (`synth -top`)**: 전 모듈, 모듈당 240s(기본), 병렬 4. **에러는 게이트 실패.** 시간 초과는 **WARN + 목록 출력** — "느려서 못 끝냄"은 "합성 불가"가 아니기 때문. `--strict` 로 실패 처리 가능.
+- `cells=0` 은 통과로 세지 않고 **ZERO 로 따로 표시**한다. BUG-006 이 정확히 그 증상이었다.
+- 알려진 미완성 모듈(`pcie_ep_versal`, `g2_protob_top`)은 **숨기지 않고 이유와 함께 매번 출력**한다.
+
+**실행 결과 (`SYNTH_TIMEOUT=420 bash scripts/synth_gate.sh`)**
+
+```
+=== ORBIT synth gate ===============================================
+일일 게이트 (sv2v -> yosys). 최종 합성 판정은 Vivado.
+
+[0/4] tools   : Yosys 0.33 (git sha1 2584903a060) / sv2v v0.0.13
+[1/4] sources : 31 files (rtl/behavioral/ 제외)
+[2/4] tokens  : clean
+[3/4] sv2v    : OK  (31 modules -> build/synth_gate/flat.v)
+
+--- STAGE 1: elaborate + check (전 모듈, 모듈당 120s, 병렬 4) ---
+  ok      cdc_fifo
+  ok      ctrl_fsm
+  ok      desc_queue
+  ok      dma_bridge
+  ok      desc_fsm_v2
+  ok      act_sram
+  ok      g3_desc_fsm
+  ok      g2_ctrl_top
+  FAIL    g2_protob_top            ERROR: Found 171 problems in 'check -assert'.
+  ok      gemm_int4_fpga
+  ok      gemm_int4_sky130
+  ok      gemm_core
+  ok      gemm_stub
+  ok      gemm_int4_synth
+  ok      gemm_wb_wrapper
+  ok      irq_ctrl
+  ok      mac_array
+  ok      mac_pe
+  ok      gemm_top
+  ok      oom_guard
+  FAIL    pcie_ep_versal           ERROR: Found 171 problems in 'check -assert'.
+  ok      reg_top
+  ok      reset_seq
+  ok      scale_fabric_ctrl
+  ok      trace_ring
+  ok      vpu_core_synth
+  ok      vpu_lut
+  TIMEOUT backward_engine          >120s
+  ok      wgt_sram
+  TIMEOUT g3_int_top               >120s
+  TIMEOUT mxu_bf16_16x16           >120s
+
+  KNOWN INCOMPLETE (게이트 실패로 치지 않음, 매번 표시):
+    - g2_protob_top: pcie_ep_versal 을 인스턴스화하므로 같은 undriven 포트를 물려받는다.
+    - pcie_ep_versal: CPM AXI-Stream 포트가 스텁 — BAR 요청 출력이 undriven (CLAUDE.md 2절, docs/AUDIT.md §5 #16). PCIe 실동작은 docs/DESIGN.md 10절에서 범위 밖.
+  WARN: elaborate 시간 초과 3개 (>120s):
+         backward_engine
+         g3_int_top
+         mxu_bf16_16x16
+  -> STAGE 1 통과 (26/31, 시간 초과 3, known 2)
+
+--- STAGE 2: synth -top (전 모듈, 모듈당 420s, 병렬 4) ---
+  ok      ctrl_fsm                 1s       cells=499
+  ok      cdc_fifo                 1s       cells=1167
+  ok      desc_fsm_v2              4s       cells=2786
+  ok      dma_bridge               1s       cells=880
+  ok      desc_queue               24s      cells=66030
+  ok      act_sram                 62s      cells=99294
+  ok      g3_desc_fsm              4s       cells=2897
+  ok      g2_ctrl_top              325s     cells=657868
+  ok      g2_protob_top            338s     cells=657773
+  TIMEOUT backward_engine          >420s
+  TIMEOUT g3_int_top               >420s
+  ok      gemm_int4_sky130         73s      cells=43900
+  ok      gemm_stub                0s       cells=203
+  ok      gemm_int4_fpga           139s     cells=50594
+  ok      gemm_core                191s     cells=429672
+  ok      irq_ctrl                 1s       cells=549
+  ok      mac_array                1s       cells=196352
+  ok      mac_pe                   0s       cells=730
+  ok      gemm_wb_wrapper          98s      cells=71262
+  ok      oom_guard                2s       cells=3752
+  ok      pcie_ep_versal           0s       cells=4
+  ok      reg_top                  11s      cells=7250
+  ok      reset_seq                0s       cells=52
+  ok      scale_fabric_ctrl        0s       cells=62
+  ok      trace_ring               49s      cells=143610
+  ok      gemm_top                 189s     cells=430402
+  ok      vpu_lut                  2s       cells=1130
+  ok      wgt_sram                 62s      cells=99294
+  TIMEOUT gemm_int4_synth          >420s
+  TIMEOUT mxu_bf16_16x16           >420s
+  ok      vpu_core_synth           419s     cells=117158
+
+WARN: 시간 초과 4개 (>420s) — 합성 불가가 아니라 '측정 못 함'이다:
+       backward_engine
+       g3_int_top
+       gemm_int4_synth
+       mxu_bf16_16x16
+       SYNTH_TIMEOUT=1800 으로 다시 돌리거나 Vivado 로 판정할 것.
+=== PASS ===========================================================
+STAGE 1 elaborate 26/31  (시간 초과 3, known-incomplete 2)
+STAGE 2 synth     27/31  (시간 초과 4, 0셀 0, known-incomplete 0)
+주의: 이것은 일일 게이트다. FPGA 합성·타이밍 판정은 Vivado 로만 한다.
+EXIT=0
+```
+
+`cells=` 는 **design hierarchy 총계**다 (하위 모듈 포함). 예: `gemm_core 429,672` 는
+`gemm_core` 자체 34,735 + `act_sram` 99,294 + `wgt_sram` 99,294 + `mac_array` 196,352 의 합.
+
+읽을 만한 숫자:
+
+| 모듈 | 셀 수(총계) | 의미 |
+|---|---|---|
+| `g2_ctrl_top` | **657,868** | 제어 평면 전체가 합성된다는 첫 실측 |
+| `mac_array` | **196,352** | 북극성의 핵심 부품. `mac_pe` 730 × 256 + 배선 |
+| `act_sram` / `wgt_sram` | 99,294 / **99,294** | BUG-006 수정 전 wgt_sram 은 **0** 이었다 |
+| `gemm_core` | 429,672 | BUG-006 수정 전 1,523 |
+| `mac_pe` | 730 | DFF 32개 = 32비트 누산기 ✔ |
+
+기본 예산(240s)으로는 `g2_ctrl_top` 이 시간 초과였다. **420s 면 잡힌다.**
+일일 게이트는 기본값으로 돌리고, RTL 을 크게 건드린 날은 `SYNTH_TIMEOUT=420` 을 권한다.
+
+### 게이트가 잡아낸 합성 결함 (전부 `docs/BUGS.md` 에 명령 출력과 함께)
+
+| # | 모듈 | 문제 | 상태 |
+|---|---|---|---|
+| BUG-002 | `cdc_fifo` | `initial` 이 **포트 리스트 안**에 있어 iverilog·sv2v 둘 다 거부 → **한 번도 컴파일된 적 없음** | 수정 |
+| BUG-003 | `mxu_bf16_16x16` | 함수 안 **경계 없는 `while`** | 수정 (경계 25 for 루프) |
+| BUG-004/5 | `desc_fsm_v2`, `g3_desc_fsm` | `fault_code_r` 를 **두 `always_ff` 가 구동** (다중 드라이버) | 수정 |
+| **BUG-006** | `wgt_sram`, `gemm_core` | 시뮬 전용 `=== 1'bx` X 가드가 **합성에서 로직을 삭제**. `wgt_sram` **0 cells**, `gemm_core` 1,523 → **34,735 cells** (로직 95% 소멸) | 수정 |
+
+**BUG-006 이 오늘 가장 중요한 발견이다.** 고치기 전 상태로 실물에 올렸다면
+**가중치 SRAM 이 없고 GEMM 결과가 0 으로 기록되는 칩**이 나왔다.
+시뮬레이션은 `` `ifdef COCOTB_SIM `` 이 켜진 채 돌기 때문에 261개 테스트가 끝까지 정상으로 보였다.
+시뮬레이션과 합성이 **서로 다른 회로**를 보고 있었다.
+
+### W2-2 — `done_pulse` 가설: **확정**
+
+지시대로 두 assertion 을 만들었다.
+
+**(b) `done_pulse` 폭 1사이클** — `tb/tb_desc_fsm_v2_done_pulse.py`
+
+```
+NOP:     pulses=[(2, 1)] total_high=1 fault=None      ← PASS
+GEMM:    pulses=[(5, 1)] total_high=1 fault=None      ← PASS
+ILLEGAL: pulses=[(3, 1)] total_high=1 fault=3         ← 폭은 1이지만 fault 인데 펄스가 났다
+CRCFAIL: pulses=[(2, 1)] total_high=1 fault=2
+TIMEOUT: pulses=[(35, 1)] total_high=1 fault=35
+** TESTS=6 PASS=3 FAIL=3 SKIP=0 **
+```
+
+폭 자체는 전부 정확히 1사이클이었다. **폭은 문제가 아니었다.**
+
+**(a) fault 시 `DESC_DONE` IRQ 미발생** — `tb/tb_g2_ctrl_top_fault_irq.py`
+
+```
+NOP        IRQ_PENDING = 0x00000001 ['DESC_DONE']                 ← PASS (대조군)
+ILLEGAL    IRQ_PENDING = 0x00000021 ['DESC_DONE', 'TC0_FAULT']    ← FAIL
+CRCFAIL    IRQ_PENDING = 0x00000021 ['DESC_DONE', 'TC0_FAULT']    ← FAIL
+** TESTS=3 PASS=1 FAIL=2 SKIP=0 **
+```
+
+**가설 확정.** 실패한 디스크립터가 완료 IRQ 를 올린다.
+사이클 표(`rtl/desc_fsm_v2.sv` 단독, illegal opcode):
+
+```
+cyc | state | busy | fault_valid | fault_code | done_pulse
+  2 |     7 |    1 |           0 |        0x1 |          0     ST_FAULT
+  3 |     6 |    0 |           1 |        0x1 |          1     ST_DONE  ← ★ 둘이 같은 사이클
+  4 |     0 |    0 |           1 |        0x1 |          0     ST_IDLE
+```
+
+원인은 `rtl/desc_fsm_v2.sv:331` `ST_FAULT: state_n = ST_DONE;` 3줄.
+파형: `build/tb/g2_ctrl_top/g2_ctrl_top.fst`. 상세: `docs/BUGS.md` BUG-001.
+**지시대로 수정하지 않았다** — 수정 방향 3안을 BUGS.md 에 적어뒀고, `docs/DESIGN.md` 9절을 먼저 고쳐야 한다.
+
+### 부수적으로 만든 것
+
+- `scripts/check_banned_tokens.py` — 주석·문자열을 공백 치환한 뒤 검사한다. CLAUDE.md 4절의 `grep -v '^\s*//'` 는 블록 주석을 못 거른다.
+- `tb/run_tb.py` — `tb/` 에 Makefile 이 없어서 CLAUDE.md 4절의 `cd tb && make ...` 가 실행 불가였다 (AUDIT §4). iverilog + sv2v 로 돌린다.
+
+### 남은 문제 (정직하게)
+
+1. **기존 `tb/` 테스트벤치 대부분은 아직 실행 못 한다.** iverilog 는 unpacked array 포트를 지원하지 않아 sv2v 를 거치는데, 그러면 `dut.desc_bytes[i]` 같은 접근이 깨진다 (sv2v 가 packed 벡터로 낮춤). 내가 새로 쓴 두 테스트벤치는 두 모양을 모두 지원하는 어댑터를 넣었지만, **기존 36개는 고치지 않았다.** 근본 해결은 verilator 5.022+ (cocotb 2.x 요구) 이고 Debian 은 5.020 이다.
+2. **`mxu_bf16_16x16` 은 FP32 가산기 256개**를 한 사이클에 넣은 구조다. yosys 20분+. 실물에서 100MHz 는 커녕 합성이 될지도 미검증. `docs/DESIGN.md` 10절이 BF16 을 범위 밖으로 두고 있으니 W1-1 처럼 격리 대상일 수 있다 — 결정 필요 #3.
+3. `tb/results.xml` 은 git 에 추적되는 **낡은 결과 파일**이다 (6건, Windows 경로). 지우거나 gitignore 해야 한다.
+
+---
+
+## 결정 필요 v2
+
+**#1 — `CLAUDE.md` 규칙 1 금지 토큰에 `===` / `!==` (X 비교) 추가?**
+BUG-006 의 근본 원인이다. `real`·`$exp` 와 같은 이유 — 시뮬레이션에서만 의미가 있고 합성에서는 조용히 다른 회로가 된다. `` `ifdef COCOTB_SIM `` 안은 예외여야 해서 체커에 아직 넣지 않았다. **권고: 추가.**
+
+**#2 — `while` 도 금지 토큰에 추가?**
+BUG-003. 경계 없는 `while` 은 하드웨어가 아니다. 현재 합성 대상 RTL 에는 0건이라 지금 추가해도 게이트는 통과한다. **권고: 추가.**
+
+**#3 — `mxu_bf16_16x16` 계열도 behavioral 로?**
+`mxu_bf16_128x128`(524,288 FF)과 `kvc_core`(2 Mbit FF)는 이미 옮겼다 — 아무 데도 안 쓰이고 명백히 하드웨어가 아니어서 판단이 쉬웠다.
+`mxu_bf16_16x16` 은 다르다: `backward_engine` 과 `g3_int_top` 이 실제로 쓴다. 그런데 `backward_engine` 은 CLAUDE.md 2절이 명시적으로 격리 대상에서 제외한 모듈이다. **혼자 판단하지 않고 남겨둔다.**
+
+**#4 — pytest 문서 실패 3건 처리**
+`docs/ORBIT_G2_VCK190_{BUILD,PCIE_BRINGUP,FAILURE_MATRIX}.md` 3개가 없어서 나는 실패다. `.gitignore` 의 `docs/` 때문에 push 된 적이 없다. 지시는 "CPM 5건만 xfail" 이었으므로 **이 3건은 손대지 않고 빨간 채로 뒀다.** 선택지: (a) 정원님 로컬에 원본이 있으면 커밋 → 3건 통과, (b) xfail(reason="never committed, .gitignore had docs/"), (c) 문서를 새로 씀. **권고: (a).**
+
+---
+
 ## 2026-09-10 (세션 1) — 감사 + W1-1 착수
 
 **한 것**: `docs/AUDIT.md` 작성 (5개 항목 전부 실측·명령 출력 첨부) / yosys·iverilog·sv2v 설치 / W1-1 파일 이동 19개 실행 (커밋 안 함).

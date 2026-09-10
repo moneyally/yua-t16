@@ -55,6 +55,12 @@ class TestTclContent:
         assert "16.0_GT/s" in content or "Gen4" in content.lower()
         assert "X8" in content
 
+    @pytest.mark.xfail(strict=True, reason=(
+        "create_cpm_ip.tcl has no CPM config -- the README claim "
+        "'VCK190 Vivado project + CPM config: Done' is false. The Tcl body says "
+        "'Cannot use create_ip ... configure CPM manually' (docs/AUDIT.md section 5, #12b). "
+        "Do NOT relax this assertion: the expectation is correct, the Tcl is incomplete."
+    ))
     def test_cpm_tcl_bar_sizes(self):
         """BAR size encoding: BAR0=20 (1M), BAR2=21 (2M), BAR4=16 (64K)."""
         content = self._read("create_cpm_ip.tcl")
@@ -65,11 +71,23 @@ class TestTclContent:
         # BAR4 size = 16
         assert "BAR4_SIZE" in content and "{16}" in content
 
+    @pytest.mark.xfail(strict=True, reason=(
+        "create_cpm_ip.tcl has no CPM config -- the README claim "
+        "'VCK190 Vivado project + CPM config: Done' is false. The Tcl body says "
+        "'Cannot use create_ip ... configure CPM manually' (docs/AUDIT.md section 5, #12b). "
+        "Do NOT relax this assertion: the expectation is correct, the Tcl is incomplete."
+    ))
     def test_cpm_tcl_vendor_device_id(self):
         content = self._read("create_cpm_ip.tcl")
         assert "10EE" in content  # vendor
         assert "9038" in content  # device
 
+    @pytest.mark.xfail(strict=True, reason=(
+        "create_cpm_ip.tcl has no CPM config -- the README claim "
+        "'VCK190 Vivado project + CPM config: Done' is false. The Tcl body says "
+        "'Cannot use create_ip ... configure CPM manually' (docs/AUDIT.md section 5, #12b). "
+        "Do NOT relax this assertion: the expectation is correct, the Tcl is incomplete."
+    ))
     def test_cpm_tcl_msix(self):
         content = self._read("create_cpm_ip.tcl")
         assert "MSIX_ENABLED" in content
@@ -112,6 +130,12 @@ class TestSmokeScriptContent:
 class TestBarConsistency:
     """BAR size parameters are consistent across all files."""
 
+    @pytest.mark.xfail(strict=True, reason=(
+        "create_cpm_ip.tcl has no CPM config -- the README claim "
+        "'VCK190 Vivado project + CPM config: Done' is false. The Tcl body says "
+        "'Cannot use create_ip ... configure CPM manually' (docs/AUDIT.md section 5, #12b). "
+        "Do NOT relax this assertion: the expectation is correct, the Tcl is incomplete."
+    ))
     def test_bar0_1mib_everywhere(self):
         from tools.orbit_mmap_backend import EXPECTED_BAR_SIZES
         assert EXPECTED_BAR_SIZES[0] == 1048576  # 1 MiB
@@ -119,6 +143,12 @@ class TestBarConsistency:
         with open(os.path.join(FPGA_DIR, "create_cpm_ip.tcl")) as f:
             assert "{20}" in f.read()  # 2^20 = 1 MiB
 
+    @pytest.mark.xfail(strict=True, reason=(
+        "create_cpm_ip.tcl has no CPM config -- the README claim "
+        "'VCK190 Vivado project + CPM config: Done' is false. The Tcl body says "
+        "'Cannot use create_ip ... configure CPM manually' (docs/AUDIT.md section 5, #12b). "
+        "Do NOT relax this assertion: the expectation is correct, the Tcl is incomplete."
+    ))
     def test_bar4_64k_everywhere(self):
         from tools.orbit_mmap_backend import EXPECTED_BAR_SIZES
         assert EXPECTED_BAR_SIZES[4] == 65536  # 64 KiB

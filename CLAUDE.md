@@ -33,11 +33,17 @@
 - `spec/`의 SSOT 규율, `tools/orbit_mmio_map.py` 레지스터맵 단일 소스.
 
 고쳐야 하는 것 (우선순위 순):
-- **`real` 타입 사용 모듈 7개 — 합성 불가.** `collective_engine.sv`, `gemm_int4.sv`, `loss_scaler.sv`, `moe_router.sv`, `optimizer_unit.sv`, `vpu_core.sv`, `vpu_fp16_utils.sv`. 이들에 의존하는 G3 학습 경로(`backward_engine` 제외)는 하드웨어가 아니라 행동 모델이다.
+- ~~**`real` 타입 사용 모듈 7개 — 합성 불가.**~~ **2026-09-10 W1-1 완료:** 7개(`collective_engine`, `gemm_int4`, `loss_scaler`, `moe_router`, `optimizer_unit`, `vpu_core`, `vpu_fp16_utils`) + 이들에 의존하는 상위 모듈을 `rtl/behavioral/` 로 격리했다. 테스트벤치는 `tb/behavioral/`, `sim/cocotb/behavioral/`. `rtl/*.sv` 는 이제 금지 토큰 0건.
+- **합성 게이트를 막는 진짜 원인은 `real` 이 아니었다 — unpacked array 포트다.** yosys 내장 프론트엔드(0.33·0.69)가 파싱하지 못한다. 합법 SystemVerilog 이고 Vivado 는 합성하므로 **RTL 을 고치지 않고 `sv2v` 전처리를 게이트에 넣는다** (`scripts/synth_gate.sh`). 일일 게이트는 sv2v→yosys, **최종 합성 판정은 Vivado.**
 - `pcie_ep_versal.sv`: CPM AXI-Stream 포트가 스텁. 비트스트림은 생성됐지만 호스트와 통신한 적 없음.
 - 외부 메모리(DDR/HBM) 경로 없음. `dma_bridge`는 상태머신이고 실제 메모리 인터페이스가 아님.
 - `mxu_bf16_128x128`은 16×16 타일 1개를 64회 반복 — 연산기 수는 256개. 이름이 실체보다 크다.
-- README가 "MPW ready", "training" 등 현재 상태를 과장함.
+- **README 과장 — `docs/AUDIT.md` §5 에 21건 목록.** 실제 문구는 다음이다 (2026-09-10 감사, 명령 출력 첨부됨):
+  - "**237 tests** ... All pass" → 실제 `python3 -m pytest tests/ -q` = **8 failed, 247 passed**.
+  - "VCK190 Vivado project + **CPM config Done**" → `fpga/vck190/create_cpm_ip.tcl` 본문이 *"Cannot use create_ip ... configure CPM manually"*. **CPM 설정이 없다.** pytest 실패 5건의 원인.
+  - "23 RTL modules"(실제 47 파일), "tb/ 9 testbenches 29 tests"(실제 36 파일 147 테스트), "docs/ 15 design documents"(`.gitignore` 가 `docs/` 를 무시해 추적 파일 0개였음 — 2026-09-10 수정).
+  - "Custom LLM Inference Accelerator", "Full closed loop verified", "No mocks", "awaiting silicon" — 0절이 금지한 종류의 표현.
+  - 이전 판의 "MPW ready", "training" 문구는 **현재 README 에 없다.** (`grep -niE "MPW|training" README.md` → 해당 없음). 위 목록으로 대체한다.
 - `done_pulse` 관련 미해결 버그 존재 (파형으로 확인 필요).
 
 ## 3. 작업 방식
