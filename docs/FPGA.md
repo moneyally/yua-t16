@@ -12,7 +12,8 @@
 | 파일 | 내용 | 상태 |
 |---|---|---|
 | `rtl/axil_reg_bridge.sv` | AXI4-Lite 슬레이브 → `reg_top` 버스 어댑터 | **시뮬레이션 검증됨** (`tb/tb_axil_reg_bridge.py` 7/7) |
-| `rtl/dr1_soc_top.sv` | 보드 최상위 = 브리지 + `g2_ctrl_top` | 린트·합성 게이트 통과 |
+| `rtl/axi4_master_adapter.sv` | 코어의 `rd_req_*`/`wr_req_*` → AXI4 마스터 (PS DDR) | **시뮬레이션 검증됨** (`tb/tb_axi4_master_adapter.py` 8/8) |
+| `rtl/dr1_soc_top.sv` | 보드 최상위 = AXI-Lite 슬레이브 + `g2_ctrl_top` + AXI4 마스터 | 린트·합성 게이트 통과 |
 | `fpga/kv260/create_project.tcl` | Vivado 프로젝트 생성 (xck26, OOC 합성) | **실행 안 해봄** |
 | `fpga/kv260/kv260_dr1.xdc` | 100MHz 클럭 + AXI 지연 제약 | **실행 안 해봄** |
 
@@ -24,6 +25,13 @@
   **BRAM 으로 추론되는지** — 모름. yosys 쪽에서는 `$mem_v2` 로 확인했지만
   (`scripts/synth_gate.sh --check-mem`) 그것이 Vivado 를 보장하지 않는다.
 - 전력 — 모름
+- **AXI4 마스터가 실제 DDR 에서 도는지** — 모름. `axi4_master_adapter` 를 받아 본 것은
+  파이썬 슬레이브 모델뿐이다. 모델은 프로토콜 위반(4KB 경계, 256 beat 상한, WLAST
+  위치)을 assert 하지만, 실제 DDR 컨트롤러의 **지연·역압·응답 순서**는 흉내 내지
+  않는다. 특히 이 어댑터는 **outstanding 1** 이라 지연이 길면 대역폭이 그대로 죽는다 —
+  보드에서 처음 볼 숫자가 그것이다.
+- PS 쪽 결선 — 미정. `m_axi_*` 를 S_AXI_HP0 에 붙이려면 Vivado 블록 디자인에서
+  폭(128비트)·클럭 도메인을 맞춰야 한다. `create_project.tcl` 에는 아직 없다.
 
 **가장 큰 미지수: 크기.** yosys 게이트 수로는 `g2_ctrl_top` 이 66만 셀이다.
 이 숫자는 일반 게이트 환산이라 LUT 수와 직접 비교할 수 없지만, KV260(K26 SOM)의

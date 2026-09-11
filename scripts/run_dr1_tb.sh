@@ -14,6 +14,10 @@
 #   rtl/dr1/dr1_top.sv       ↔  sim/golden/deltarule.py  step()  (전체 경로, W7)
 #                               + tb/tb_dr1_top.py 하네스의 불변조건 I1
 #
+# 계산이 없는 두 모듈은 골든이 아니라 **프로토콜**이 기대값이다:
+#   rtl/axil_reg_bridge.sv    ↔  AMBA AXI4-Lite
+#   rtl/axi4_master_adapter.sv ↔ AMBA AXI4 (256 beat 상한 + 4KB 경계)
+#
 # 사용:  bash scripts/run_dr1_tb.sh ; echo $?     # 0 이어야 한다
 # =============================================================================
 set -u -o pipefail
@@ -69,6 +73,8 @@ run_one g2_ctrl_top    tb_g2_ctrl_top_dr1_fault $(ls rtl/*.sv rtl/dr1/*.sv)
 run_one g2_ctrl_top    tb_dr1_host_e2e          $(ls rtl/*.sv rtl/dr1/*.sv)
 # 보드 경로의 앞단 — AXI4-Lite 브리지 (W11). 보드는 없지만 프로토콜은 지금 검증한다
 run_one axil_reg_bridge tb_axil_reg_bridge      rtl/axil_reg_bridge.sv
+# 보드 경로의 뒷단 — AXI4 마스터 (외부 메모리). 버스트 쪼개기가 계약이다
+run_one axi4_master_adapter tb_axi4_master_adapter rtl/axi4_master_adapter.sv
 
 # d=64 확장 — **같은 RTL 을 파라미터만 바꿔** 돌린다 (파일 복제 금지).
 # 스크래치를 8192 원소로 키워야 64x64 덤프가 들어간다 (spec/deltarule.md 3.6절).

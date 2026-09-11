@@ -19,7 +19,7 @@ SystemVerilog RTL 과 Python 호스트 스택. **시뮬레이션 단계이며 �
 | `gemm_core` / `gemm_top` — DMA + MAC 오케스트레이션 | **합성됨** | 429,672 / 430,402 cells |
 | Python 호스트 스택 (`tools/`) — HAL, 디스크립터 패커, 레지스터맵 SSOT, 트레이스 디코더, CLI | **동작** | `python3 -m pytest tests/ -q` |
 | PCIe (`pcie_ep_versal`) | **스텁** | CPM AXI-Stream 포트가 연결되지 않았다. 호스트와 통신한 적 없음 |
-| 외부 메모리 (DDR/HBM) | **없음** | `dma_bridge` 는 상태머신이고 실제 메모리 인터페이스가 아니다 |
+| **AXI4 마스터 (외부 메모리)** — `axi4_master_adapter` | **시뮬레이션 검증** | `tb/tb_axi4_master_adapter.py` 8/8. 256 beat 상한·4KB 경계에서 버스트를 쪼갠다 (슬레이브 모델이 위반을 assert 한다). `dr1_soc_top` 에 결선됨. **실제 DDR 에 붙여 본 적 없다** |
 | 학습 경로 (`optimizer_unit`, `loss_scaler`, `collective_engine`, G3 top) | **행동 모델 (합성 불가)** | `rtl/behavioral/` 로 격리. 아래 참조 |
 | BF16 (`mxu_bf16_16x16`) | **미측정** | 손으로 만든 FP32 가산기 256개. yosys 가 시간 예산 안에 못 끝낸다 |
 | 실물 보드 | **없음** | 보드를 산 적이 없다 |
@@ -34,7 +34,10 @@ SystemVerilog RTL 과 Python 호스트 스택. **시뮬레이션 단계이며 �
   (`tb/tb_dr1_d64.py`). **통합 빌드(`g2_ctrl_top`)는 면적 때문에 d=16 그대로**다 —
   d=64 가 보드에 들어갈지는 Vivado 를 돌려야 안다.
 - **실물 보드 없음.** Vivado 합성·타이밍은 한 번도 돌린 적이 없다 ([docs/FPGA.md](docs/FPGA.md)).
-- **PCIe·외부 메모리 없음.** 아래 표 참조.
+- **PCIe 없음.** 위 표 참조.
+- **외부 메모리는 시뮬레이션까지만.** `axi4_master_adapter` 가 AXI4 로 버스트를
+  내지만, 그것을 받은 것은 파이썬 슬레이브 모델뿐이다. 실제 DDR 컨트롤러의
+  타이밍·역압·재정렬은 보지 않았다.
 
 미해결 버그 목록과 수정된 버그의 근거는 전부 [docs/BUGS.md](docs/BUGS.md) 에 있다
 (BUG-001 `done_pulse` 는 2026-09-11 수정됨 — 완료 신호 3분할).
@@ -165,18 +168,22 @@ g2_ctrl_top  (제어 평면, 합성됨)
   ├── irq_ctrl ───── 인터럽트 컨트롤러 (W1C)
   └── reset_seq ──── 리셋 시퀀서 (POR/SW/WDOG)
 
-보드용 최상위는 `dr1_soc_top` = `axil_reg_bridge` (AXI4-Lite) + `g2_ctrl_top`.
+보드용 최상위는 `dr1_soc_top` =
+`axil_reg_bridge` (AXI4-Lite 슬레이브, 호스트→레지스터)
++ `g2_ctrl_top`
++ `axi4_master_adapter` (AXI4 마스터, 코어→외부 메모리).
 ```
 
 ```
-rtl/              합성 대상 31개 파일
-rtl/behavioral/   행동 모델 14개 — 합성 대상 아님
-tb/               cocotb 테스트벤치 + run_tb.py
-tb/behavioral/    행동 모델용 테스트벤치
-tools/            Python 호스트 스택 15개 모듈
-tests/            호스트 스택 pytest 18개 파일
-sim/golden/       numpy 골든 모델 — **deltarule.py 가 DR1 의 정답지다**
-spec/             SSOT 설계 문서 9개
+rtl/              합성 대상 34개 파일 (.sv 32 + .v 2)
+rtl/dr1/          DR1 델타룰 헤드 10개 — 역시 합성 대상
+rtl/behavioral/   행동 모델 16개 — 합성 대상 아님
+tb/               cocotb 테스트벤치 48개 + run_tb.py
+tb/behavioral/    행동 모델용 테스트벤치 8개
+tools/            Python 호스트 스택 16개 모듈
+tests/            호스트 스택 pytest 23개 파일
+sim/golden/       numpy 골든 모델 6개 — **deltarule.py 가 DR1 의 정답지다**
+spec/             SSOT 설계 문서 10개
 scripts/          synth_gate.sh, setup_tools.sh, check_banned_tokens.py
 fpga/vck190/      Vivado Tcl (CPM 설정 미완성)
 fpga/kv260/       Vivado Tcl — **실행해 본 적 없음** (docs/FPGA.md)
