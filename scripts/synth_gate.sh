@@ -48,6 +48,7 @@
 #   bash scripts/synth_gate.sh ; echo $?          # 0 이어야 한다
 #   bash scripts/synth_gate.sh --stage1           # 빠른 검사만
 #   bash scripts/synth_gate.sh --strict           # 시간 초과도 실패로
+#   bash scripts/synth_gate.sh --check-mem state_sram   # BRAM 추론 검사 추가
 #   SYNTH_TIMEOUT=1800 ELAB_TIMEOUT=600 JOBS=8 bash scripts/synth_gate.sh
 # =============================================================================
 set -u -o pipefail
@@ -75,11 +76,20 @@ declare -A KNOWN_INCOMPLETE=(
 
 STAGE1_ONLY=0
 STRICT=0
-for a in "$@"; do
-  case "$a" in
-    --stage1) STAGE1_ONLY=1 ;;
-    --strict) STRICT=1 ;;
-    *) echo "알 수 없는 인자: $a"; exit 2 ;;
+CHECK_MEM=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --stage1) STAGE1_ONLY=1; shift ;;
+    --strict) STRICT=1; shift ;;
+    --check-mem)
+      # 이 모듈이 yosys 에서 **메모리 셀($mem_v2)로 인식되는지** 검사한다.
+      # 플립플롭으로 풀리면 실패. BRAM 추론이 깨졌다는 뜻이고, 실물에서
+      # state_sram 이 D*D*W 개 FF 로 펼쳐진다 (d=16 이면 4096 FF).
+      # docs/BUGS.md BUG-006 이 "합성에서 조용히 다른 회로가 되는" 예였다 —
+      # 이것도 같은 종류라서 게이트로 막는다.
+      [ -n "${2:-}" ] || { echo "--check-mem 에 모듈 이름이 필요하다"; exit 2; }
+      CHECK_MEM="$CHECK_MEM $2"; shift 2 ;;
+    *) echo "알 수 없는 인자: $1"; exit 2 ;;
   esac
 done
 
@@ -97,10 +107,11 @@ echo "[0/4] tools   : $($YOSYS -V 2>&1 | head -1) / sv2v $($SV2V --version 2>&1 
 mkdir -p "$BUILD"
 
 # --- 1. 대상 수집 ------------------------------------------------------------
-# rtl/ 최상위만. rtl/behavioral/ 은 glob 에 걸리지 않는다 (행동 모델, 합성 대상 아님).
-mapfile -t SOURCES < <(ls "$ROOT"/rtl/*.sv "$ROOT"/rtl/*.v 2>/dev/null | sort)
+# rtl/ 최상위 + rtl/dr1/ (ORBIT-DR1 신규 모듈).
+# rtl/behavioral/ 은 **일부러 제외**한다 (행동 모델, 합성 대상 아님).
+mapfile -t SOURCES < <(ls "$ROOT"/rtl/*.sv "$ROOT"/rtl/*.v "$ROOT"/rtl/dr1/*.sv 2>/dev/null | sort)
 [ "${#SOURCES[@]}" -gt 0 ] || fail "rtl/ 에 합성 대상 파일이 없다"
-echo "[1/4] sources : ${#SOURCES[@]} files (rtl/behavioral/ 제외)"
+echo "[1/4] sources : ${#SOURCES[@]} files (rtl/ + rtl/dr1/, rtl/behavioral/ 제외)"
 
 # --- 2. 금지 토큰 (CLAUDE.md 규칙 1) -----------------------------------------
 if ! python3 "$ROOT/scripts/check_banned_tokens.py" "${SOURCES[@]}" > "$BUILD/banned_tokens.txt" 2>&1; then
@@ -156,6 +167,33 @@ if [ "$E_TMO" -gt 0 ]; then
   echo "  WARN: elaborate 시간 초과 ${E_TMO}개 (>${ELAB_TIMEOUT}s):"; sed 's/^/         /' "$BUILD/.e_timeout"
 fi
 echo "  -> STAGE 1 통과 ($(( ${#MODULES[@]} - E_TMO - ${#E_KNOWN[@]} ))/${#MODULES[@]}, 시간 초과 ${E_TMO}, known ${#E_KNOWN[@]})"
+
+# --- 메모리 추론 검사 (--check-mem) --------------------------------------------
+if [ -n "$CHECK_MEM" ]; then
+  echo ""
+  echo "--- 메모리 추론 검사 ($CHECK_MEM) ---"
+  MEM_FAIL=0
+  for m in $CHECK_MEM; do
+    log="$BUILD/mem_$m.log"
+    if ! "$YOSYS" -q -l "$log" -p "read_verilog -defer $FLAT; hierarchy -check -top $m; proc; memory_collect; stat" >/dev/null 2>&1; then
+      printf "  FAIL  %-24s yosys 실패 (%s)\n" "$m" "$log"; MEM_FAIL=1; continue
+    fi
+    # 해당 모듈의 stat 섹션만 떼어낸다
+    sec=$(awk -v m="$m" 'index($0, "=== " m " ===") > 0 { on = 1 } on' "$log")
+    cnt=$(printf '%s\n' "$sec" | grep -oE '[$]mem(_v2)?[[:space:]]+[0-9]+' | head -1 | grep -oE '[0-9]+$')
+    if [ -n "$cnt" ] && [ "$cnt" -ge 1 ]; then
+      printf "  ok    %-24s \$mem_v2 x%s (BRAM 추론됨)\n" "$m" "$cnt"
+    else
+      ff=$(printf '%s\n' "$sec" | grep -oE '[$][a-z]*dff[a-z_0-9]*[[:space:]]+[0-9]+' \
+           | grep -oE '[0-9]+$' | awk '{s+=$1} END{print s+0}')
+      printf "  FAIL  %-24s \$mem 셀이 없다. 플립플롭 %s개로 풀렸다 — BRAM 추론 깨짐\n" "$m" "$ff"
+      MEM_FAIL=1
+    fi
+  done
+  if [ "$MEM_FAIL" -ne 0 ]; then
+    fail "메모리 추론 검사 실패. 배열에 리셋이 붙었거나 접근이 여러 always_ff 로 갈라졌는지 확인할 것."
+  fi
+fi
 
 if [ "$STAGE1_ONLY" -eq 1 ]; then
   echo ""

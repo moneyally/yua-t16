@@ -2,6 +2,16 @@
 
 ---
 
+## 2026-09-11 (세션 9, 자율모드) — W5 RTL 4개 · 신규성 주장 철회
+
+- **한 것**: 골든을 RTL 단위로 분해(`requantize_q15`/`matvec`/`update_row`/`compute_err`, `step()` 은 조합만) → `rtl/dr1/` 4개 모듈(`requant_q15` 172셀, `state_sram` 8,516셀 `$mem_v2 x1`, `vec_regs` 3,202셀, `matvec_unit` 34,968셀) + tb 4개 전부 골든 비트 일치, `tools/orbit_pack.py`(평탄화 규칙 SSOT), 게이트에 `--check-mem`, DESIGN 6.1 실측표(`matvec_unit` = **19사이클 = D+3**, 계약 상한 20). 그리고 **DESIGN 1절 신규성 주장 철회** — 선행 연구 arXiv 2603.05931 인용 + `docs/PRIOR_ART.md` 신설(5편).
+- **안 된 것**: 논문 **본문을 못 읽었다** (arxiv.org 가 egress 프록시 차단) — 기준선의 수치 형식·패스 수는 "미확인" 으로 남겼다. STAGE 2 시간 초과 4개(`backward_engine`, `g3_int_top`, `gemm_int4_synth`, `mxu_bf16_16x16`) 여전히 측정 못 함. pytest 3건 실패(VCK190 문서, 사용자 과제). `update_unit`/`dr1_top` 은 W6.
+- **검증 명령**: `bash scripts/synth_gate.sh --check-mem state_sram` → **EXIT=0** (STAGE1 34/36, STAGE2 32/36) · `bash scripts/run_dr1_tb.sh` → 4/4 ok (TESTS=16 PASS=16 FAIL=0) · `python3 -m pytest tests/ -q` → **3 failed, 308 passed, 5 xfailed** · `python3 sim/golden/deltarule.py` → 전부 통과 (S 0.634/0.661 LSB, o 고립 0.499/0.500) · `grep -nE "세상에 없는|최초|아무도" README.md CLAUDE.md` → **0건**.
+- **다음 세션 첫 작업**: W6 — `rtl/dr1/update_unit.sv`(행 단위 스트리밍, `mac_pe` D개, 골든 `update_row()` 와 비트 일치) → `dr1_top.sv` FSM 골격 INIT/DUMP 만(STEP 은 `DONE_ERR` + `fault_code=UNIMPL`) → `CocotbDut.init/dump` 구현(`done_ok` 폴링, `done_pulse` 사용 금지).
+- **결정 필요**: (1) `docs/PRIOR_ART.md` 3절 경고 — **2608.15533 DeltaLog 가 Q-B(게으른 감쇠)를, 2608.22354 SANE 이 Q-A(장기 상태 안정화)를 이미 다룬다.** 주말 연구 세션의 4개 질문 중 2개가 이미 절반 답이 나와 있다는 뜻이다. 그래도 원래 4개로 갈지, 질문을 다시 뽑을지. (2) 기준선 논문 본문 수치가 필요하면 정원님이 PDF 를 받아 붙여줘야 한다 (프록시 차단).
+
+---
+
 ## 2026-09-11 (세션 8, 자율모드) — W4-2 하네스 골격 · 1단계(3~4주) 종료
 
 **한 것**: **W4-2 `tb/tb_dr1_top.py` 완성** — DUT 추상 클래스(`init`/`step`/`dump`), `GoldenDut`, `CocotbDut`(자리만+안내), `OffByOneDut`(오류 주입), 하네스, 불일치 출력 형식 확정. `tests/test_dr1_harness.py` **27개 전부 통과** — 골든-대-골든 **N=1000, d=16·64, 시드 3개** 포함. `pytest.ini` 로 `slow` 마커 등록 (빠른 확인용).

@@ -139,8 +139,8 @@ def _rshift_round_half_even(x: int, shift: int) -> int:
     return q
 
 
-def _sat_q15(x: int, sat: SatCounter | None = None) -> int:
-    """Q1.15 범위로 포화."""
+def sat_q15(x: int, sat: SatCounter | None = None) -> int:
+    """Q1.15 범위로 포화. RTL 대응: requant_q15.sv 의 포화 단계."""
     if x > Q15_MAX:
         if sat is not None:
             sat.bump()
@@ -165,21 +165,58 @@ def _sat_acc(x: int, sat: SatCounter | None = None) -> int:
     return x
 
 
+def requantize_q15(acc, frac_bits: int = FRAC_BITS):
+    """Q(1+frac).frac 누산기 → Q1.15. **RTL 대응: `rtl/dr1/requant_q15.sv`**
+
+    round-half-to-even 으로 `frac_bits` 만큼 내리고 Q1.15 로 포화한다.
+    `step()` 과 RTL 이 둘 다 이 한 곳만 쓴다 — 반올림 규칙이 두 곳에 있으면 갈라진다.
+
+    인자
+    ----
+    acc : int 또는 정수 배열 (40비트 누산기 값)
+
+    반환
+    ----
+    (q15, sat_flag)
+      스칼라를 주면 (int, bool), 배열을 주면 (int64 ndarray, bool ndarray).
+      `sat_flag` 는 **원소별** 포화 여부다. 호출 쪽에서 세면 SAT_EVENT 수가 된다.
+    """
+    arr = np.asarray(acc, dtype=object)     # 파이썬 int 로 정확히 다룬다 (40비트+)
+    scalar = arr.ndim == 0
+    flat = arr.reshape(-1)
+    out = np.empty(flat.shape, dtype=np.int64)
+    flg = np.empty(flat.shape, dtype=bool)
+    for i, x in enumerate(flat):
+        shifted = _rshift_round_half_even(int(x), frac_bits)
+        if shifted > Q15_MAX:
+            out[i], flg[i] = Q15_MAX, True
+        elif shifted < Q15_MIN:
+            out[i], flg[i] = Q15_MIN, True
+        else:
+            out[i], flg[i] = shifted, False
+    if scalar:
+        return int(out[0]), bool(flg[0])
+    return out.reshape(arr.shape), flg.reshape(arr.shape)
+
+
 def q15_mul(a: int, b: int, sat: SatCounter | None = None) -> int:
     """Q1.15 × Q1.15 → Q1.15. 곱은 Q2.30(int32), 재양자화는 round-half-to-even."""
     prod = int(a) * int(b)                       # Q2.30
-    return _sat_q15(_rshift_round_half_even(prod, FRAC_BITS), sat)
+    return sat_q15(_rshift_round_half_even(prod, FRAC_BITS), sat)
 
 
 def q15_from_acc(acc: int, sat: SatCounter | None = None) -> int:
-    """40비트 Q2.30 누산기 → Q1.15."""
-    return _sat_q15(_rshift_round_half_even(int(acc), FRAC_BITS), sat)
+    """40비트 Q2.30 누산기 → Q1.15. `requantize_q15` 의 스칼라 단축형."""
+    v, f = requantize_q15(int(acc))
+    if f and sat is not None:
+        sat.bump()
+    return v
 
 
 def float_to_q15(x: float) -> int:
     """float → Q1.15 raw. 경계에서 포화한다. 입력 생성용이며 연산 경로에는 쓰지 않는다."""
     v = _rshift_round_half_even(int(round(x * (1 << (FRAC_BITS + 8)))), 8)
-    return _sat_q15(v)
+    return sat_q15(v)
 
 
 def q15_to_float(x: int) -> float:
@@ -192,6 +229,87 @@ def float_to_uq15(x: float) -> int:
     if x < 0.0 or x > 1.0:
         raise ValueError(f"α/β 는 [0, 1] 이어야 한다: {x}")
     return check_uq15_gate(int(round(x * ONE_Q15)), "value")
+
+
+# ---------------------------------------------------------------------------
+# 조각 단위 연산 — **RTL 모듈과 1:1 대응한다**
+#
+# RTL 과 골든이 같은 조각으로 나뉘어 있어야, 비트 불일치가 났을 때 어느 조각인지
+# 바로 보인다. 각 RTL 파일 헤더에 대응하는 함수 이름을 적어 둔다.
+#
+#   requantize_q15  ↔  rtl/dr1/requant_q15.sv
+#   matvec          ↔  rtl/dr1/matvec_unit.sv
+#   update_row      ↔  rtl/dr1/update_unit.sv   (W6)
+# ---------------------------------------------------------------------------
+def matvec(S, x):
+    """y = S·x. **RTL 대응: `rtl/dr1/matvec_unit.sv`**
+
+    행마다 D개 곱(Q1.15×Q1.15 → Q2.30)을 40비트 누산기에 모으고, 행이 끝나면
+    `requantize_q15` 로 한 번 내린다.
+
+    반환: (y_q15 : (d,) int64, sat_count : int)
+    """
+    S = np.asarray(S, dtype=np.int64)
+    x = np.asarray(x, dtype=np.int64)
+    d = S.shape[0]
+    assert S.shape == (d, d) and x.shape == (d,), f"모양 불일치: {S.shape}, {x.shape}"
+
+    sat = SatCounter()
+    accs = []
+    for i in range(d):
+        acc = 0
+        for j in range(d):
+            acc = _sat_acc(acc + int(S[i, j]) * int(x[j]), sat)
+        accs.append(acc)
+    y, flags = requantize_q15(np.array(accs, dtype=object))
+    sat.bump(int(np.count_nonzero(flags)))
+    return y.astype(np.int64), sat.n
+
+
+def update_row(S_row, alpha_uq15: int, beta_uq15: int, err_i: int, k):
+    """S_row_new = α·S_row + β·err_i·kᵀ. **RTL 대응: `rtl/dr1/update_unit.sv`** (W6)
+
+    `α·S_row` 와 `β·err·k` 를 **Q2.30 누산기에서 합산한 뒤 1회만** 재양자화한다
+    (`docs/DESIGN.md` 3절). 항마다 내리면 오차가 1 LSB 를 넘는다.
+
+    alpha/beta 는 **UQ1.15** (0x8000 = 1.0). 1.0 초과는 ValueError.
+
+    반환: (row_q15 : (d,) int64, sat_count : int)
+    """
+    S_row = np.asarray(S_row, dtype=np.int64)
+    k = np.asarray(k, dtype=np.int64)
+    d = S_row.shape[0]
+    assert k.shape == (d,), f"k 모양 불일치: {k.shape}"
+    a = check_uq15_gate(alpha_uq15, "alpha")
+    b = check_uq15_gate(beta_uq15, "beta")
+
+    sat = SatCounter()
+    berr = q15_mul(b, int(err_i), sat)
+    accs = []
+    for j in range(d):
+        acc = _sat_acc(a * int(S_row[j]), sat)
+        acc = _sat_acc(acc + berr * int(k[j]), sat)
+        accs.append(acc)
+    row, flags = requantize_q15(np.array(accs, dtype=object))
+    sat.bump(int(np.count_nonzero(flags)))
+    return row.astype(np.int64), sat.n
+
+
+def compute_err(v, p, alpha_uq15: int):
+    """err = v − α·p. **RTL 대응: `rtl/dr1/dr1_top.sv` 의 ERR 상태** (W6)
+
+    `docs/DESIGN.md` 2절의 정확한 전개. `err = v − p` 는 α=1 일 때만 같다.
+    반환: (err_q15 : (d,) int64, sat_count : int)
+    """
+    v = np.asarray(v, dtype=np.int64)
+    p = np.asarray(p, dtype=np.int64)
+    a = check_uq15_gate(alpha_uq15, "alpha")
+    sat = SatCounter()
+    err = np.empty(v.shape, dtype=np.int64)
+    for i in range(v.shape[0]):
+        ap = q15_mul(a, int(p[i]), sat)
+        err[i] = sat_q15(int(v[i]) - ap, sat)
+    return err, sat.n
 
 
 # ---------------------------------------------------------------------------
@@ -229,46 +347,29 @@ def step(S, q, k, v, alpha: int, beta: int):
     alpha = check_uq15_gate(alpha, "alpha")
     beta = check_uq15_gate(beta, "beta")
 
-    sat = SatCounter()
+    # **조각 함수만 조합한다.** RTL 이 같은 조각으로 나뉘어 있으므로,
+    # 비트 불일치가 나면 어느 조각인지 바로 좁혀진다.
+    total = 0
 
-    # 1~2. p = S·k   (40비트 누산 후 재양자화)
-    p = np.empty(d, dtype=np.int64)
-    for i in range(d):
-        acc = 0
-        for j in range(d):
-            acc = _sat_acc(acc + int(S[i, j]) * int(k[j]), sat)
-        p[i] = q15_from_acc(acc, sat)
+    # 1~2.  p = S·k                     ← matvec_unit
+    p, n = matvec(S, k)
+    total += n
 
-    # 3~5. err = v − α·p  (DESIGN.md 2절 "주의"의 정확한 식), β·err
-    berr = np.empty(d, dtype=np.int64)
-    for i in range(d):
-        ap = q15_mul(alpha, int(p[i]), sat)
-        err = _sat_q15(int(v[i]) - ap, sat)
-        berr[i] = q15_mul(beta, err, sat)
+    # 3~5.  err = v − α·p               ← dr1_top 의 ERR 상태
+    err, n = compute_err(v, p, alpha)
+    total += n
 
-    # 6~8. S_next = α·S + berr·kᵀ
-    #
-    # **Q2.30 누산기 안에서 더한 뒤 한 번만 재양자화한다.**
-    # 항마다 Q1.15 로 내렸다가 더하면 재양자화가 2번 일어나 오차가 1 LSB 를 넘는다
-    # (실측 1.06~1.65 LSB). 이 순서는 DESIGN.md 8절의 재사용 계획
-    # "acc 초기값을 α·S 행으로 로드하는 경로 추가" 와도 일치한다 —
-    # mac_array 의 누산기에 α·S 를 싣고 외적을 누산한 뒤 마지막에 한 번 내린다.
+    # 6~8.  S_next 행마다 α·S + β·err·kᵀ ← update_unit
     S_next = np.empty((d, d), dtype=np.int64)
     for i in range(d):
-        for j in range(d):
-            acc = _sat_acc(int(alpha) * int(S[i, j]), sat)          # Q2.30 로드
-            acc = _sat_acc(acc + int(berr[i]) * int(k[j]), sat)     # Q2.30 누산
-            S_next[i, j] = q15_from_acc(acc, sat)                   # 한 번만 재양자화
+        S_next[i], n = update_row(S[i], alpha, beta, int(err[i]), k)
+        total += n
 
-    # 9~10. o = S_next·q
-    o = np.empty(d, dtype=np.int64)
-    for i in range(d):
-        acc = 0
-        for j in range(d):
-            acc = _sat_acc(acc + int(S_next[i, j]) * int(q[j]), sat)
-        o[i] = q15_from_acc(acc, sat)
+    # 9~10. o = S_next·q                ← matvec_unit (재사용)
+    o, n = matvec(S_next, q)
+    total += n
 
-    return S_next, o, sat.n
+    return S_next, o, total
 
 
 def run(S, tokens, dtype=np.int64):
@@ -352,8 +453,8 @@ def _check_round_half_even():
 
 def _check_saturation():
     sat = SatCounter()
-    assert _sat_q15(Q15_MAX + 1, sat) == Q15_MAX
-    assert _sat_q15(Q15_MIN - 1, sat) == Q15_MIN
+    assert sat_q15(Q15_MAX + 1, sat) == Q15_MAX
+    assert sat_q15(Q15_MIN - 1, sat) == Q15_MIN
     assert sat.n == 2
     # -1.0 × -1.0 = +1.0 은 Q1.15 로 표현 불가 → 포화해야 한다
     s2 = SatCounter()

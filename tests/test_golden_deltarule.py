@@ -21,6 +21,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from sim.golden.deltarule import float_to_uq15 as G_uq  # noqa: E402
 from sim.golden.deltarule import (  # noqa: E402
     ONE_Q15,
     Q15_MAX,
@@ -347,3 +348,94 @@ def test_module_self_test_passes():
     from sim.golden.deltarule import self_test
 
     assert self_test(verbose=False) is True
+
+
+# ---------------------------------------------------------------------------
+# 조각 분해 — step() 이 matvec / compute_err / update_row 조합과 비트 일치하는가
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("d", DIMS)
+def test_step_equals_manual_composition_of_pieces(d):
+    """기대값 출처: sim/golden/deltarule.py 의 조각 함수(matvec/compute_err/update_row)를 수동 조합.
+
+    RTL 은 이 조각들과 1:1 로 대응한다 (`rtl/dr1/matvec_unit.sv`, `update_unit.sv`,
+    `requant_q15.sv`). **step() 이 조각 조합과 비트 하나라도 다르면**, RTL 을 조각별로
+    골든과 맞춰도 전체가 안 맞는다는 뜻이다. 그래서 이 동등성을 테스트로 고정한다.
+    """
+    from sim.golden.deltarule import compute_err, matvec, update_row
+
+    r = rng(777)
+    for _ in range(3):
+        S = random_state(r, d)
+        q, k, v = random_vec(r, d), random_vec(r, d), random_vec(r, d)
+        alpha = G_uq(0.93)
+        beta = G_uq(0.21)
+
+        S_step, o_step, sat_step = step(S, q, k, v, alpha, beta)
+
+        # 수동 조합 — docstring 의 1~10 단계 그대로
+        total = 0
+        p, n = matvec(S, k)
+        total += n
+        err, n = compute_err(v, p, alpha)
+        total += n
+        S_man = np.empty((d, d), dtype=np.int64)
+        for i in range(d):
+            S_man[i], n = update_row(S[i], alpha, beta, int(err[i]), k)
+            total += n
+        o_man, n = matvec(S_man, q)
+        total += n
+
+        assert np.array_equal(S_step, S_man), (
+            "step() 의 S 가 조각 조합과 다르다. 첫 불일치 "
+            f"{np.argwhere(S_step != S_man)[:3].tolist()}"
+        )
+        assert np.array_equal(o_step, o_man), (
+            f"step() 의 o 가 조각 조합과 다르다: {np.argwhere(o_step != o_man)[:3].tolist()}"
+        )
+        assert sat_step == total, f"포화 수가 다르다: step={sat_step} 조합={total}"
+
+
+@pytest.mark.parametrize("d", DIMS)
+def test_matvec_matches_naive_reference(d):
+    """기대값 출처: 정의 그대로의 소박한 구현 — matvec 이 y=S·x 인지 독립 확인."""
+    from sim.golden.deltarule import matvec, q15_from_acc
+
+    r = rng(31)
+    S, x = random_state(r, d), random_vec(r, d)
+    y, sat = matvec(S, x)
+    want = np.array(
+        [q15_from_acc(sum(int(S[i, j]) * int(x[j]) for j in range(d))) for i in range(d)],
+        dtype=np.int64,
+    )
+    assert np.array_equal(y, want), f"matvec 불일치: {np.argwhere(y != want)[:3].tolist()}"
+    assert sat == 0
+
+
+def test_requantize_q15_boundaries():
+    """기대값 출처: DESIGN.md 3절 round-half-to-even + 포화. RTL 대응: requant_q15.sv."""
+    from sim.golden.deltarule import Q15_MAX, Q15_MIN, requantize_q15
+
+    ONE = 1 << 15
+    cases = [
+        (0, 0, False),
+        (ONE // 2, 0, False),            # +0.5 LSB → 짝수(0)로
+        (ONE // 2 + ONE, 2, False),      # +1.5 LSB → 2 (q=1 홀수 → 짝수로 올림)
+        (ONE // 2 + 2 * ONE, 2, False),  # +2.5 LSB → 2 (q=2 짝수 → 내림)
+        (-(ONE // 2) - ONE, -2, False),  # −1.5 LSB → −2
+        (-(ONE // 2), 0, False),         # -0.5 LSB → 0
+        (Q15_MAX * ONE, Q15_MAX, False),
+        ((Q15_MAX + 1) * ONE, Q15_MAX, True),      # 포화 +
+        (Q15_MIN * ONE, Q15_MIN, False),
+        ((Q15_MIN - 1) * ONE, Q15_MIN, True),      # 포화 −
+    ]
+    for acc, want, want_sat in cases:
+        got, sat = requantize_q15(acc)
+        assert (got, sat) == (want, want_sat), (
+            f"requantize_q15({acc}) = ({got}, {sat}), 기대 ({want}, {want_sat})"
+        )
+
+    # 배열 입력도 같은 답
+    accs = np.array([c[0] for c in cases], dtype=object)
+    arr, flags = requantize_q15(accs)
+    assert arr.tolist() == [c[1] for c in cases]
+    assert flags.tolist() == [c[2] for c in cases]

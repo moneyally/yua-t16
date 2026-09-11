@@ -113,6 +113,31 @@
 
 덤프 크기는 `d × d × 2` 바이트. v1 `d=16` → 512바이트.
 
+### 3.5 벡터·상태 평탄화 규칙
+
+RTL 의 `q_flat` / `k_flat` / `v_flat` / `state_sram.rd_data` 는 모두 이 규칙을 따른다:
+
+```
+원소 i  =  bits[i*W +: W]          (i=0 이 최하위, W=16)
+```
+
+상태 `S` 의 `DELTA_DUMP` 순서는 **행 우선(row-major)** 이다:
+
+```
+행 r 의 워드 = pack_vec(S[r])      r = 0, 1, ..., d-1 순서로 연속
+```
+
+Q1.15 는 **부호 있는** 16비트다 — 평탄화할 때 2의 보수 비트패턴으로 넣고,
+풀 때 부호를 복원한다.
+
+바이트로 내릴 때는 리틀엔디언이다. 평탄화 규칙(원소 i 가 낮은 비트)과
+리틀엔디언이 일치하므로 **바이트 순서 = 원소 순서**다.
+
+**구현 단일 출처: `tools/orbit_pack.py`**
+(`pack_vec` / `unpack_vec` / `pack_state` / `unpack_state` / `bytes_of_vec` / `vec_of_bytes`).
+RTL 테스트벤치와 `CocotbDut` 이 **이 함수만** 쓴다. 규칙이 두 곳에 있으면
+한쪽을 고칠 때 다른 쪽이 조용히 틀린다 (`docs/BUGS.md` BUG-006 과 같은 종류).
+
 ---
 
 ## 4. 실패 조건 → `done_err`
