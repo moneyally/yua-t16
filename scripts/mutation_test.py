@@ -44,6 +44,10 @@ class Mutant:
     new: str
     why: str          # 이 실수가 실제로 일어나면 무엇이 깨지는가
     quick: bool = False
+    # 기본은 골든 모델이다. 다른 **불변 코드**(한 번 정하면 안 바뀌고, 틀리면
+    # 조용히 틀리는 것)도 같은 방식으로 지킨다 — 아래 WDOG 뮤턴트가 그렇다.
+    target: str = str(GOLDEN_REL)
+    oracle: str = ORACLE
 
 
 # 각 뮤턴트는 **실제로 저지를 법한 실수** 여야 한다. 아무 문자나 바꾸면
@@ -136,6 +140,46 @@ MUTANTS = [
         "            pass\n        return Q15_MAX",
         "포화를 세지 않는다. DR1_SAT_COUNT 가 항상 0 이 되고 I4 가 죽는다.",
     ),
+
+    # ── 워치독 레지스터 헬퍼 (spec/watchdog.md 가 정답지) ──────────────
+    # 왜 여기 있나: 이 비트 배치는 **한 번 정하면 안 바뀌는 코드**다. 틀려도
+    # 파이썬은 멀쩡히 돌고 RTL 도 멀쩡히 돌고, 보드에서만 안 맞는다.
+    # 그런 코드를 지키는 것은 pytest 뿐이므로, 그 pytest 가 실제로 지키는지 본다.
+    Mutant(
+        "wdog_period_shift",
+        "WDOG_PERIOD_SH   = 8",
+        "WDOG_PERIOD_SH   = 9",
+        "PERIOD 이 한 비트 밀린다. 창 길이가 2배가 되고 보드에서만 드러난다.",
+        target="tools/orbit_mmio_map.py",
+        oracle="tests/test_mmio_map.py",
+        quick=True,
+    ),
+    Mutant(
+        "wdog_kick_dropped",
+        "    if kick:\n        word |= WDOG_KICK",
+        "    if False:\n        word |= WDOG_KICK",
+        "켤 때 KICK 을 안 싣는다 → 첫 창이 옛 PERIOD 로 돈다 "
+        "(tb_wdog_timer T7 이 설명하는 그 경우).",
+        target="tools/orbit_mmio_map.py",
+        oracle="tests/test_orbit_device_api.py",
+    ),
+    Mutant(
+        "wdog_no_range_check",
+        "    if not 0 <= period < (1 << WDOG_PERIOD_W):",
+        "    if False:",
+        "범위를 안 본다 → 17비트 PERIOD 가 EN 비트를 밟는다. "
+        "워치독이 꺼지거나 창이 엉뚱해진다.",
+        target="tools/orbit_mmio_map.py",
+        oracle="tests/test_mmio_map.py",
+    ),
+    Mutant(
+        "wdog_timeout_off_by_one",
+        "    return (period + 1) * WDOG_PRESCALE",
+        "    return period * WDOG_PRESCALE",
+        "PERIOD=0 이 '타임아웃 0 사이클' 이 된다. 호스트가 창을 잘못 계산한다.",
+        target="tools/orbit_mmio_map.py",
+        oracle="tests/test_mmio_map.py",
+    ),
 ]
 
 
@@ -147,10 +191,11 @@ def build_sandbox(tmp: Path) -> Path:
     return tmp
 
 
-def run_oracle(sandbox: Path, timeout: int = 300) -> tuple[bool, str]:
-    """샌드박스에서 골든 테스트를 돌린다. (통과 여부, 마지막 줄)"""
+def run_oracle(sandbox: Path, oracle: str = ORACLE,
+               timeout: int = 300) -> tuple[bool, str]:
+    """샌드박스에서 오라클 테스트를 돌린다. (통과 여부, 마지막 줄)"""
     r = subprocess.run(
-        [sys.executable, "-m", "pytest", ORACLE, "-x", "-q", "--no-header"],
+        [sys.executable, "-m", "pytest", oracle, "-x", "-q", "--no-header"],
         cwd=sandbox, capture_output=True, text=True, timeout=timeout,
     )
     tail = (r.stdout.strip().splitlines() or [""])[-1]
@@ -167,40 +212,45 @@ def main() -> int:
 
     if args.list:
         for m in mutants:
-            print(f"{m.name:24s} {m.why}")
+            print(f"{m.name:24s} [{m.target}] {m.why}")
         return 0
 
-    print("=== 골든 모델 뮤테이션 테스트 ===")
-    print(f"대상  : {GOLDEN_REL}")
-    print(f"오라클: {ORACLE}")
+    targets = sorted({m.target for m in mutants})
+    oracles = sorted({m.oracle for m in mutants})
+    print("=== 불변 코드 뮤테이션 테스트 ===")
+    print(f"대상  : {', '.join(targets)}")
+    print(f"오라클: {', '.join(oracles)}")
     print(f"뮤턴트: {len(mutants)}개\n")
 
-    src = (REPO / GOLDEN_REL).read_text()
+    src_cache = {t: (REPO / t).read_text() for t in targets}
 
     # 0) 원본은 반드시 통과해야 한다. 아니면 뮤테이션 결과가 무의미하다.
     with tempfile.TemporaryDirectory() as td:
         sb = build_sandbox(Path(td))
-        ok, tail = run_oracle(sb)
-        if not ok:
-            print(f"  원본이 이미 실패한다: {tail}")
-            print("  뮤테이션 테스트는 원본이 통과할 때만 의미가 있다.")
-            return 2
-        print(f"  기준선(원본) 통과 확인: {tail}\n")
+        for o in oracles:
+            ok, tail = run_oracle(sb, o)
+            if not ok:
+                print(f"  원본이 이미 실패한다 ({o}): {tail}")
+                print("  뮤테이션 테스트는 원본이 통과할 때만 의미가 있다.")
+                return 2
+            print(f"  기준선(원본) 통과 확인 {o}: {tail}")
+    print()
 
     survived = []
     for m in mutants:
+        src = src_cache[m.target]
         n = src.count(m.old)
         if n != 1:
             print(f"  SKIP    {m.name:24s} 패턴이 {n}번 나온다 (1번이어야 한다) — "
-                  f"골든이 바뀌었으면 뮤턴트도 고쳐야 한다")
+                  f"{m.target} 이 바뀌었으면 뮤턴트도 고쳐야 한다")
             survived.append((m, f"패턴 {n}회"))
             continue
 
         with tempfile.TemporaryDirectory() as td:
             sb = build_sandbox(Path(td))
-            (sb / GOLDEN_REL).write_text(src.replace(m.old, m.new, 1))
+            (sb / m.target).write_text(src.replace(m.old, m.new, 1))
             try:
-                ok, tail = run_oracle(sb)
+                ok, tail = run_oracle(sb, m.oracle)
             except subprocess.TimeoutExpired:
                 ok, tail = True, "시간 초과"
 
@@ -217,7 +267,7 @@ def main() -> int:
             print(f"  {m.name}: {m.why}")
         return 1
 
-    print(f"=== 전부 죽었다 ({len(mutants)}/{len(mutants)}) — 골든 테스트가 살아 있다 ===")
+    print(f"=== 전부 죽었다 ({len(mutants)}/{len(mutants)}) — 오라클 테스트가 살아 있다 ===")
     return 0
 
 

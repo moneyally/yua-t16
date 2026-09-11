@@ -2,6 +2,49 @@
 
 ---
 
+## 2026-09-11 (세션 12, 자율 위임 계속) — 남은 스텁 닫기: 외부 메모리 · 워치독 · 보드 최상위
+
+"보드 구매 단계 전까지 모든 스텁을 실동작되게" 라는 지시를 이어받았다.
+`CLAUDE.md` 2절에 남아 있던 항목 중 **KV260 경로 위에 있는 것**부터 닫았다.
+
+- **한 것**: (1) **외부 메모리 경로** — `rtl/axi4_master_adapter.sv` 신설(1,320셀).
+  AXI4 버스트 두 규칙(256 beat 상한, 4KB 경계)에 맞춰 쪼갠다. `dr1_soc_top` 의
+  tie-off 를 걷어내고 결선, `m_axi_*` 를 밖으로 냈다. 슬레이브 모델이 프로토콜
+  위반을 assert 한다(봐주는 모델은 테스트가 아니다). (2) **워치독** —
+  `rtl/wdog_timer.sv` 신설(164셀) + `spec/watchdog.md` SSOT. `reg_top` 의
+  "Proto-A stub: register only, no actual timer" 를 닫았다; `reset_seq` 는 이미
+  `wdog_reset`/`BOOT_CAUSE[1]` 을 갖고 있었고 **없던 건 타이머 하나뿐**이었다.
+  `por_n` 도메인에 둔다 — 자기 리셋에 꺼지는 워치독은 아무것도 못 구한다.
+  (3) **보드 최상위 검증** — `tools/orbit_axil_backend.py` + `tb/tb_dr1_soc_top.py`.
+  호스트 스택이 **AXI4-Lite 만으로** `G2_ID` 읽기 → `DELTA_INIT` → `DELTA_STEP`
+  10토큰 골든 비트 일치까지 간다. PLAN W12 의 보드 순서를 시뮬레이션에서 미리 밟은 것.
+  (4) 뮤테이션 테스트를 골든 전용에서 **대상별**로 일반화하고 워치독 헬퍼 4개를 추가 — 17/17 killed.
+- **안 된 것**: **보드에서 돈 것은 하나도 없다.** AXI4 마스터를 받아 본 것은
+  파이썬 모델뿐이고 실제 DDR 의 지연·역압·응답 순서는 안 봤다 (outstanding 1 이라
+  지연이 길면 대역폭이 그대로 죽는다 — 보드에서 처음 볼 숫자). Vivado 없음 →
+  자원·타이밍 여전히 전부 미측정. **PCIe(`pcie_ep_versal`)는 손대지 않았다** —
+  타깃 보드가 KV260(Zynq MPSoC)이라 Versal CPM 은 PLAN 경로 밖이고,
+  PG347 도 보드도 없이 쓰면 검증 못 하는 코드가 된다 (규칙 6·7). 게이트 시간 초과
+  4개(backward_engine, g3_int_top, gemm_int4_synth, mxu_bf16_16x16) 여전.
+- **검증 명령**: `bash scripts/run_dr1_tb.sh` → **17/17 ok (99 테스트)** ·
+  `SYNTH_TIMEOUT=420 bash scripts/synth_gate.sh` → **PASS (exit 0)**,
+  STAGE1 45/45, STAGE2 41/45, 셀 회귀 10% 초과 0 ·
+  `python3 -m pytest tests/ -q` → **333 passed, 8 xfailed** ·
+  `python3 scripts/mutation_test.py` → **17/17 killed** ·
+  `python3 scripts/check_banned_tokens.py rtl/*.sv rtl/*.v rtl/dr1/*.sv` → clean ·
+  verilator 경고 신규 0건(g2_ctrl_top 17건은 전부 기존 것, 단독 린트와 수 동일).
+- **다음 세션 첫 작업**: (a) `DR1_CYCLES` 가 호스트 경로에서 **127** 이다(DESIGN 6.1 에
+  기입). 126→127 은 디스크립터 디스패치 1사이클이고 AXI 를 지나도 안 변한다 —
+  줄이려면 DESIGN 6.3 의 남은 항목(스크래치 128비트화)을 본다. (b) `desc_fsm_v2` 의
+  `queue_class_r` 가 아직 소비되지 않는다 — 우선순위 중재/트레이스 태깅 중 **트레이스
+  태깅만** 하면 싸게 닫힌다. (c) `docs/RESEARCH.md` Q-F 는 **승인 대기** 그대로.
+- **결정 필요**: (1) **PCIe 를 어떻게 할지.** 내 판단으로는 `pcie_ep_versal` 을
+  "ORBIT-DR1 범위 밖(다른 보드용 유물)" 으로 문서에 못박고 더 안 건드리는 게 맞다.
+  지금처럼 "스텁" 으로 두면 계속 빚처럼 보인다. (2) **보드 구매** — 위임 범위 밖이다.
+  0~3단계 종료 기준은 충족됐다고 본다(호스트 경로 골든 비트 일치, 합성 게이트 통과,
+  보드 최상위 시뮬레이션 통과). PLAN W11 결정 게이트는 정원 몫.
+  (3) 워치독 기본 PERIOD 를 호스트가 뭘로 잡을지 — 지금은 호스트가 매번 정한다.
+
 ## 2026-09-11 (세션 11, 자율 위임) — W7~W11: DELTA_STEP 완성 · 호스트 E2E · 보드 前 준비
 
 사용자가 자율 진행을 위임했다 (보드 구매 단계 전까지, 허락 없이 결정·진행).

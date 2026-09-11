@@ -17,6 +17,8 @@ from tools.orbit_backend import Backend
 from tools.orbit_mmio_map import (
     G2_ID, G2_VERSION, G2_CAP0, G2_CAP1,
     BOOT_CAUSE, SW_RESET, WDOG_CTRL,
+    WDOG_EN, WDOG_KICK, WDOG_TEST_FIRE, WDOG_PERIOD_MASK, WDOG_PERIOD_SH,
+    wdog_ctrl_word, wdog_timeout_cycles,
     QUEUE_STATUSES, Q_OVERFLOW, QUEUE_DOORBELLS,
     TC0_RUNSTATE, TC0_CTRL, TC0_FAULT_STATUS,
     TC0_PERF_CYC_LO, TC0_PERF_CYC_HI,
@@ -233,7 +235,33 @@ class OrbitDevice:
         self._b.write(SW_RESET.offset, 0x01)
 
     def watchdog_inject(self):
-        self._b.write(WDOG_CTRL.offset, 0x8000_0000)
+        """즉시 워치독 리셋을 쏜다 (`WDOG_CTRL[31]`). EN 과 무관한 테스트 경로."""
+        self._b.write(WDOG_CTRL.offset, WDOG_TEST_FIRE)
+
+    # ── Watchdog (SSOT: spec/watchdog.md) ───────────────────────
+    def watchdog_enable(self, period: int):
+        """워치독을 켠다. 타임아웃 = (period+1) × 1024 사이클.
+
+        PERIOD 와 EN 을 **한 번에** 쓴다 — 나눠 쓰면 그 사이에 옛 PERIOD 로
+        터질 수 있다 (spec/watchdog.md 3절). KICK 을 함께 실어 새 창에서 출발한다.
+        이후 `watchdog_kick()` 을 타임아웃보다 자주 부르지 않으면 칩이 리셋된다.
+        """
+        self._b.write(WDOG_CTRL.offset, wdog_ctrl_word(period, enable=True))
+
+    def watchdog_kick(self):
+        """살아 있다고 알린다. **현재 EN/PERIOD 를 유지한 채** 창만 다시 연다."""
+        cur = self._b.read(WDOG_CTRL.offset)
+        self._b.write(WDOG_CTRL.offset, (cur & WDOG_PERIOD_MASK)
+                      | (cur & WDOG_EN) | WDOG_KICK)
+
+    def watchdog_disable(self):
+        """워치독을 끈다. 카운터는 리로드된 채 멈춘다."""
+        self._b.write(WDOG_CTRL.offset, 0)
+
+    def watchdog_timeout_cycles(self) -> int:
+        """지금 설정된 타임아웃(사이클). 안 켜져 있으면 그래도 창 크기를 알려준다."""
+        cur = self._b.read(WDOG_CTRL.offset)
+        return wdog_timeout_cycles((cur & WDOG_PERIOD_MASK) >> WDOG_PERIOD_SH)
 
     # ── Perf ────────────────────────────────────────────────────
     def freeze_perf(self):

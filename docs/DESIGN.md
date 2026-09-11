@@ -169,6 +169,12 @@ v1의 데이터 경로는 기존 `act_sram`/`wgt_sram`처럼 **온칩 SRAM 스�
 | `dr1_top` `DELTA_STEP` | `step()` | **4·d = 64** | **126** ← 여전히 초과 | `tb/tb_dr1_harness_rtl.py` R8 (1,000토큰 전부 126) |
 | `dr1_top` `DELTA_DUMP` | — | — | **305** | `tb/tb_dr1_top_fsm.py` F2 |
 | `dr1_top` `DELTA_STEP` **(d=64)** | `step()` | 4·d = 256 | **462** ← 초과 | `tb/tb_dr1_d64.py` X4. 20토큰 비트 일치 |
+| `DELTA_STEP` — **호스트 경로**(디스크립터) | `step()` | — | **127** | `tb/tb_dr1_host_e2e.py` H2, `tb/tb_dr1_soc_top.py` S3 |
+
+**126 과 127 의 차이**: 126 은 `dr1_top` 의 `cmd_valid` 부터 `done` 까지다. 127 은
+호스트가 `DR1_CYCLES` 로 읽는 값이고, 디스크립터 디스패치 1사이클이 더 들어 있다.
+**AXI4-Lite 를 지나도 127 그대로다** (`tb_dr1_soc_top.py` S3 = `tb_dr1_host_e2e.py` H2).
+버스가 사이클 수를 바꾸지 않는다는 뜻이다 — 바뀌면 그게 버그다.
 
 `matvec_unit` 이 D+3 인 이유: `state_sram` 읽기 지연 1사이클 때문에 요청과 소비가
 한 사이클 겹쳐서 D행을 D+1 사이클에 처리하고, 거기에 start 수락 1 + done 1 이 붙는다.

@@ -159,6 +159,38 @@ BOOT_CAUSE_WDOG = 1 << 1
 BOOT_CAUSE_SW   = 1 << 2
 BOOT_CAUSE_FLR  = 1 << 3
 
+# WDOG_CTRL — SSOT: spec/watchdog.md 1절
+WDOG_EN          = 1 << 0        # 타이머 동작
+WDOG_KICK        = 1 << 1        # 쓰기 펄스: 카운터 리로드 (저장 안 됨, 0 으로 읽힘)
+WDOG_TEST_FIRE   = 1 << 31       # 쓰기 펄스: 즉시 리셋 (EN 과 무관, 기존 동작)
+WDOG_PERIOD_SH   = 8
+WDOG_PERIOD_W    = 16
+WDOG_PERIOD_MASK = ((1 << WDOG_PERIOD_W) - 1) << WDOG_PERIOD_SH
+WDOG_PRESCALE    = 1024          # 타임아웃 = (PERIOD+1) × 1024 사이클
+
+
+def wdog_ctrl_word(period: int, *, enable: bool = True, kick: bool = True) -> int:
+    """`WDOG_CTRL` 에 쓸 32비트 값. **PERIOD 와 EN 을 한 번에 쓴다.**
+
+    두 번 나눠 쓰면 그 사이에 옛 PERIOD 로 터질 수 있다 (spec/watchdog.md 3절).
+    기본으로 KICK 을 같이 실어 새 창에서 출발한다.
+    """
+    if not 0 <= period < (1 << WDOG_PERIOD_W):
+        raise ValueError(
+            f"WDOG PERIOD 는 0..{(1 << WDOG_PERIOD_W) - 1} 여야 한다 (받은 값 {period})"
+        )
+    word = (period << WDOG_PERIOD_SH) & WDOG_PERIOD_MASK
+    if enable:
+        word |= WDOG_EN
+    if kick:
+        word |= WDOG_KICK
+    return word
+
+
+def wdog_timeout_cycles(period: int) -> int:
+    """타임아웃까지의 사이클 수. spec/watchdog.md 1절의 수식 그대로."""
+    return (period + 1) * WDOG_PRESCALE
+
 # TC0_RUNSTATE
 TC_STATE_IDLE  = 0
 TC_STATE_FETCH = 1

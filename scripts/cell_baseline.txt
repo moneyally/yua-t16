@@ -18,36 +18,39 @@
 #   죽은 게 아니라 mac_pe 가 인스턴스당 37셀 작게 합성됐고 mac_array 안에 256개가
 #   있어서 증폭된 것이다 (하위 모듈 셀 수를 g2_ctrl_top 로그와 대조해 확인).
 #   나머지 모듈의 ±0.1% 흔들림도 같은 성격(ABC 비결정성)이다.
+#
+# 2026-09-11 갱신 2 — wdog_timer(164) 추가. WDOG_CTRL 이 레지스터만이던 것을
+#   실제 타이머로 바꿨다 (spec/watchdog.md). g2_ctrl_top 은 +0.03% 수준.
+act_sram 99294
+axi4_master_adapter 1320
 axil_reg_bridge 205
 cdc_fifo 1167
-axi4_master_adapter 1320
 ctrl_fsm 499
-desc_fsm_v2 2844
+desc_fsm_v2 2843
+desc_queue 66029
 dma_bridge 880
 dr1_scratch 17762
-desc_queue 66028
-act_sram 99294
-dr1_tb_wrap 232323
-dr1_top 157357
-err_unit 31492
-dr1_soc_top 877707
+dr1_soc_top 877852
+dr1_tb_wrap 229795
+dr1_top 157356
+err_unit 31480
+g2_ctrl_top 885790
+g2_protob_top 886454
 g3_desc_fsm 2897
-g2_ctrl_top 885412
-g2_protob_top 886325
-gemm_int4_sky130 43835
-gemm_int4_fpga 50556
-gemm_stub 203
 gemm_core 429672
-gemm_wb_wrapper 71226
+gemm_int4_fpga 50556
+gemm_int4_sky130 43835
+gemm_stub 203
+gemm_top 430409
+gemm_wb_wrapper 71258
 irq_ctrl 549
 mac_array 196352
 mac_pe 730
 matvec_tb_wrap 43484
-gemm_top 430404
-matvec_unit 34968
-oom_guard 3752
+matvec_unit 34956
+oom_guard 3747
 pcie_ep_versal 4
-reg_top 7610
+reg_top 7566
 requant_q15 172
 reset_seq 52
 scale_fabric_ctrl 60
@@ -55,6 +58,7 @@ state_sram 8516
 trace_ring 143610
 update_unit 75169
 vec_regs 3202
+vpu_core_synth 117019
 vpu_lut 1130
+wdog_timer 164
 wgt_sram 99294
-vpu_core_synth 116929

@@ -35,7 +35,11 @@ module reg_top #(
   input  logic [3:0]  boot_cause,
   output logic        sw_reset_pulse,
   output logic        sw_cause_clr,
-  output logic        wdog_test_pulse,   // watchdog test inject
+  output logic        wdog_test_pulse,   // watchdog test inject (WDOG_CTRL[31])
+  // Watchdog timer controls — SSOT: spec/watchdog.md section 1
+  output logic        wdog_en,           // WDOG_CTRL[0]
+  output logic        wdog_kick,         // WDOG_CTRL[1] write pulse
+  output logic [15:0] wdog_period,       // WDOG_CTRL[23:8]
 
   // ── desc_queue ──
   output logic [31:0]              desc_stage [0:DESC_WORDS-1],
@@ -242,13 +246,29 @@ module reg_top #(
   end
   assign perf_freeze = perf_freeze_r[0];
 
-  // Watchdog control (Proto-A stub: register only, no actual timer)
+  // ---------------------------------------------------------------
+  // Watchdog control — SSOT: spec/watchdog.md section 1
+  //   [0] EN (stored) | [1] KICK (write pulse) | [23:8] PERIOD (stored)
+  //   [31] TEST_FIRE (write pulse)
+  // KICK and TEST_FIRE are write pulses, NOT state: they are deliberately
+  // masked out of the stored word so a read-modify-write from the host does
+  // not re-fire them. Read-back is {8'b0, PERIOD, 7'b0, EN}.
+  // ---------------------------------------------------------------
+  localparam logic [31:0] WDOG_STORE_MASK = 32'h00FF_FF01;   // PERIOD | EN
+
   logic [31:0] wdog_ctrl_r;
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) wdog_ctrl_r <= 32'd0;
-    else if (wr_en && addr == A_WDOG_CTRL) wdog_ctrl_r <= wr_data;
+    else if (wr_en && addr == A_WDOG_CTRL)
+      wdog_ctrl_r <= wr_data & WDOG_STORE_MASK;
   end
-  // Watchdog test inject: write bit[31]=1 fires wdog_reset pulse
+
+  assign wdog_en     = wdog_ctrl_r[0];
+  assign wdog_period = wdog_ctrl_r[23:8];
+  // KICK is one cycle wide, taken straight off the write — never stored.
+  assign wdog_kick   = wr_en && (addr == A_WDOG_CTRL) && wr_data[1];
+  // Watchdog test inject: write bit[31]=1 fires wdog_reset pulse.
+  // Independent of EN — this path predates the timer and tests rely on it.
   assign wdog_test_pulse = wr_en && (addr == A_WDOG_CTRL) && wr_data[31];
 
   // Boot vector (stored but not consumed in Proto-A)

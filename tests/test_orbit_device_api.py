@@ -116,3 +116,48 @@ class TestPerf:
     def test_mxu_zero_at_start(self, dev):
         assert dev.read_mxu_busy_cycles() == 0
         assert dev.read_tile_count() == 0
+
+
+class TestWatchdog:
+    """기대값 출처: spec/watchdog.md 1·3절. 호스트가 쓰는 **워드 자체**를 본다.
+
+    타이머 동작은 `tb/tb_wdog_timer.py` 가 RTL 로 본다. 여기서 보는 것은
+    "HAL 이 스펙이 말한 비트를 쓰는가" 뿐이다 — 그게 어긋나면 RTL 이 맞아도
+    보드에서 안 돈다.
+    """
+
+    def test_enable_writes_period_and_enable_together(self, dev):
+        from tools.orbit_mmio_map import WDOG_CTRL, WDOG_EN, WDOG_KICK
+        dev.watchdog_enable(99)
+        w = dev.read_reg(WDOG_CTRL.offset)
+        assert (w >> 8) & 0xFFFF == 99
+        assert w & WDOG_EN, "EN 이 안 실렸다"
+        assert w & WDOG_KICK, "새 창에서 출발하도록 KICK 을 같이 실어야 한다"
+
+    def test_kick_preserves_period_and_enable(self, dev):
+        from tools.orbit_mmio_map import WDOG_CTRL, WDOG_EN, WDOG_KICK
+        dev.watchdog_enable(7)
+        dev.watchdog_kick()
+        w = dev.read_reg(WDOG_CTRL.offset)
+        assert (w >> 8) & 0xFFFF == 7, "킥이 PERIOD 를 날렸다"
+        assert w & WDOG_EN, "킥이 EN 을 껐다"
+        assert w & WDOG_KICK
+
+    def test_disable_clears_everything(self, dev):
+        from tools.orbit_mmio_map import WDOG_CTRL
+        dev.watchdog_enable(5)
+        dev.watchdog_disable()
+        assert dev.read_reg(WDOG_CTRL.offset) == 0
+
+    def test_timeout_cycles_reflects_setting(self, dev):
+        dev.watchdog_enable(9)
+        assert dev.watchdog_timeout_cycles() == 10 * 1024
+
+    def test_inject_uses_bit31(self, dev):
+        from tools.orbit_mmio_map import WDOG_CTRL, WDOG_TEST_FIRE
+        dev.watchdog_inject()
+        assert dev.read_reg(WDOG_CTRL.offset) & WDOG_TEST_FIRE
+
+    def test_enable_rejects_bad_period(self, dev):
+        with pytest.raises(ValueError):
+            dev.watchdog_enable(1 << 16)

@@ -49,16 +49,31 @@ module g2_ctrl_top #(
 );
 
   // ===============================================================
-  // Reset (with watchdog stub)
+  // Reset + watchdog
   // ===============================================================
+  // The watchdog used to be a stub: WDOG_CTRL stored a value and only bit[31]
+  // (test inject) did anything. It is now a real timer — spec/watchdog.md.
+  // Why it matters on a board: if DELTA_STEP hangs, SW_RESET only helps while
+  // the host can still write registers. The chip needs one way out on its own.
+  //
+  // The timer runs on the always-on clock with por_n, NOT rst_core_n: a
+  // watchdog that its own reset switches off cannot recover anything.
   logic rst_io_n, rst_mem_n, rst_core_n;
   logic [3:0] boot_cause;
   logic sw_reset_pulse, sw_cause_clr, wdog_test_pulse;
+  logic wdog_en, wdog_kick, wdog_timeout;
+  logic [15:0] wdog_period;
+
+  wdog_timer #(.PRESCALE_LOG2(10), .PERIOD_W(16)) u_wdog (
+    .clk(clk), .rst_n(por_n),
+    .en(wdog_en), .kick(wdog_kick), .period(wdog_period),
+    .timeout(wdog_timeout)
+  );
 
   reset_seq u_reset (
     .clk(clk), .por_n(por_n),
     .sw_reset(sw_reset_pulse),
-    .wdog_reset(wdog_test_pulse),  // watchdog stub: test inject only
+    .wdog_reset(wdog_timeout | wdog_test_pulse),
     .pcie_flr(1'b0),
     .rst_io_n(rst_io_n), .rst_mem_n(rst_mem_n), .rst_core_n(rst_core_n),
     .boot_cause(boot_cause), .sw_cause_clr(sw_cause_clr),
@@ -127,6 +142,7 @@ module g2_ctrl_top #(
     .addr(reg_addr), .wr_en(reg_wr_en), .wr_data(reg_wr_data), .rd_data(reg_rd_data),
     .boot_cause(boot_cause), .sw_reset_pulse(sw_reset_pulse), .sw_cause_clr(sw_cause_clr),
     .wdog_test_pulse(wdog_test_pulse),
+    .wdog_en(wdog_en), .wdog_kick(wdog_kick), .wdog_period(wdog_period),
     .desc_stage(desc_stage), .doorbell_pulse(doorbell_pulse),
     .q_head(q_head), .q_tail(q_tail),
     .overflow_flags(overflow_flags), .overflow_clr(overflow_clr),

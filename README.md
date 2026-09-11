@@ -13,9 +13,10 @@ SystemVerilog RTL 과 Python 호스트 스택. **시뮬레이션 단계이며 �
 |---|---|---|
 | **ORBIT-DR1 델타룰 헤드 (d=16)** — `dr1_top` + `matvec_unit`/`update_unit`/`err_unit`/`requant_q15`/`state_sram`/`vec_regs`/`dr1_scratch` | **동작 + 비트 정확** | `DELTA_INIT`/`STEP`/`DUMP` 전부. 골든 `step()` 과 **1,000토큰 × 시드 3개 비트 일치** (`bash scripts/run_dr1_tb.sh` → 13/13, 72 테스트). 126사이클/토큰 (d=16), 462 (d=64) |
 | **호스트 경로 E2E** — `dev.delta_step()` → 디스크립터 → RTL → 결과 | **동작** | `tb/tb_dr1_host_e2e.py` 6/6. 스크래치 MMIO 창 왕복 포함 |
-| **AXI4-Lite 브리지** — `axil_reg_bridge`, `dr1_soc_top` | **시뮬레이션 검증** | `tb/tb_axil_reg_bridge.py` 7/7. **보드에서는 안 돌려봤다** ([docs/FPGA.md](docs/FPGA.md)) |
+| **보드 최상위 전체** — `dr1_soc_top` = `axil_reg_bridge` + `g2_ctrl_top` + `axi4_master_adapter` | **시뮬레이션 검증** | `tb/tb_dr1_soc_top.py` 6/6 — 호스트 스택이 **AXI4-Lite 만으로** `G2_ID` 읽기 → `DELTA_INIT` → `DELTA_STEP` 10토큰 골든 비트 일치. `tb/tb_axil_reg_bridge.py` 7/7. **보드에서는 안 돌려봤다** ([docs/FPGA.md](docs/FPGA.md)) |
 | `mac_pe`, `mac_array` — INT8 16×16 출력 고정 외적 누산 | **합성됨** | `mac_array` 196,352 cells (`scripts/synth_gate.sh`) |
-| 제어 평면 — `reg_top`, `desc_queue`, `desc_fsm_v2`, `irq_ctrl`, `trace_ring`, `oom_guard`, `reset_seq`, `cdc_fifo` | **합성됨** | `g2_ctrl_top` 885,159 cells (DR1 포함) |
+| 제어 평면 — `reg_top`, `desc_queue`, `desc_fsm_v2`, `irq_ctrl`, `trace_ring`, `oom_guard`, `reset_seq`, `wdog_timer`, `cdc_fifo` | **합성됨** | `g2_ctrl_top` 885,159 cells (DR1 포함) |
+| **워치독** — `wdog_timer` | **동작** | `tb/tb_wdog_timer.py` 7/7 (사이클 단위로 파이썬 모델과 대조) + `tb/tb_g2_ctrl_top_wdog.py` 6/6 (레지스터→리셋→`BOOT_CAUSE[1]` 전체 경로). 전에는 레지스터만 있고 타이머가 없었다 |
 | `gemm_core` / `gemm_top` — DMA + MAC 오케스트레이션 | **합성됨** | 429,672 / 430,402 cells |
 | Python 호스트 스택 (`tools/`) — HAL, 디스크립터 패커, 레지스터맵 SSOT, 트레이스 디코더, CLI | **동작** | `python3 -m pytest tests/ -q` |
 | PCIe (`pcie_ep_versal`) | **스텁** | CPM AXI-Stream 포트가 연결되지 않았다. 호스트와 통신한 적 없음 |

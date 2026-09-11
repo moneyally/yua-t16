@@ -13,7 +13,9 @@
 |---|---|---|
 | `rtl/axil_reg_bridge.sv` | AXI4-Lite 슬레이브 → `reg_top` 버스 어댑터 | **시뮬레이션 검증됨** (`tb/tb_axil_reg_bridge.py` 7/7) |
 | `rtl/axi4_master_adapter.sv` | 코어의 `rd_req_*`/`wr_req_*` → AXI4 마스터 (PS DDR) | **시뮬레이션 검증됨** (`tb/tb_axi4_master_adapter.py` 8/8) |
-| `rtl/dr1_soc_top.sv` | 보드 최상위 = AXI-Lite 슬레이브 + `g2_ctrl_top` + AXI4 마스터 | 린트·합성 게이트 통과 |
+| `rtl/dr1_soc_top.sv` | 보드 최상위 = AXI-Lite 슬레이브 + `g2_ctrl_top` + AXI4 마스터 | **시뮬레이션 검증됨** (`tb/tb_dr1_soc_top.py` 6/6) — 아래 3절 2·4번을 시뮬레이션에서 먼저 밟았다 |
+| `tools/orbit_axil_backend.py` | 호스트 스택용 AXI4-Lite 백엔드 | 보드에서는 이 자리에 `/dev/mem` 백엔드가 들어간다 |
+| `rtl/wdog_timer.sv` | 워치독 타이머 (`WDOG_CTRL` → 리셋) | **시뮬레이션 검증됨** (`tb/tb_wdog_timer.py` 7/7, `tb/tb_g2_ctrl_top_wdog.py` 6/6) |
 | `fpga/kv260/create_project.tcl` | Vivado 프로젝트 생성 (xck26, OOC 합성) | **실행 안 해봄** |
 | `fpga/kv260/kv260_dr1.xdc` | 100MHz 클럭 + AXI 지연 제약 | **실행 안 해봄** |
 
@@ -57,13 +59,25 @@ vivado -mode batch -source fpga/kv260/create_project.tcl
 목표를 못 맞추면 맞췄다고 쓰지 않는다 — 주파수를 낮추고 낮췄다고 적는다.
 
 그 다음:
-1. Zynq MPSoC PS 블록 디자인 생성, `dr1_soc_top` 을 AXI4-Lite 슬레이브로 연결
+1. Zynq MPSoC PS 블록 디자인 생성, `dr1_soc_top` 을 AXI4-Lite 슬레이브로 연결.
+   AXI4 마스터(`m_axi_*`, 128비트)는 S_AXI_HP0 에 붙인다 — **DR1 경로는 안 쓰므로
+   처음 bring-up 에서는 안 붙이고 넘어가도 된다.** 붙일 때 폭과 클럭 도메인을 맞춘다.
 2. 비트스트림 → SD 부팅 → `devmem` 으로 `G2_ID` 읽기 (`0x47320001` 나와야 함)
-3. `DELTA_INIT` → `DELTA_STEP` 1토큰 → 골든과 대조
+3. **워치독을 먼저 켜지 않는다.** 2번이 성공할 때까지는 꺼 둔다 — 안 그러면
+   칩이 1초마다 리셋되는데 그게 워치독 때문인지 다른 문제인지 구분이 안 된다.
+   2번이 되면 `dev.watchdog_enable(period)` 로 켜고, 그 뒤부터 멈춤을 관측한다.
+4. `DELTA_INIT` → `DELTA_STEP` 1토큰 → 골든과 대조
 
-3번은 시뮬레이션에서 이미 통과한 경로다 (`tb/tb_dr1_host_e2e.py`).
-보드에서는 **백엔드만** 바뀐다 — `tools/orbit_backend.py` 에 `/dev/mem` 백엔드를
-하나 추가하면 `OrbitDevice` 위쪽 코드는 그대로 돌아간다.
+2번과 4번은 **시뮬레이션에서 이미 통과한 경로다** — `tb/tb_dr1_soc_top.py` 가
+`dr1_soc_top` 을 AXI4-Lite 로만 두드려서 `G2_ID` 읽기(S1), `DELTA_INIT`(S2),
+`DELTA_STEP` 1토큰(S3)·10토큰(S4) 골든 비트 일치를 확인한다.
+
+보드에서는 **백엔드만** 바뀐다 — `tools/orbit_axil_backend.py` 자리에 `/dev/mem`
+백엔드를 하나 넣으면 `OrbitDevice` 위쪽 코드는 그대로 돌아간다. 그 교체가
+**이 테스트가 증명하는 것**이다: 백엔드를 바꿔도 호스트 코드가 안 바뀐다는 것.
+
+그래도 보드가 돈다는 뜻은 아니다 (2절). 시뮬레이션이 안 보는 것: 실제 PS 의
+AXI 지연·클럭 도메인, 타이밍 클로징, 전원, DDR 컨트롤러의 실제 거동.
 
 ## 4. 측정 결과
 

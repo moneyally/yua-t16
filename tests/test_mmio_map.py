@@ -85,3 +85,48 @@ def test_access_types():
     assert BOOT_CAUSE.access == Access.RO
     assert SW_RESET.access == Access.WO
     assert WDOG_CTRL.access == Access.RW
+
+
+# ── Watchdog (SSOT: spec/watchdog.md) ────────────────────────────────
+# 기대값 출처: spec/watchdog.md 1절 비트 표와 2절 타임아웃 수식.
+
+def test_wdog_bit_positions_match_spec():
+    from tools.orbit_mmio_map import (
+        WDOG_EN, WDOG_KICK, WDOG_TEST_FIRE,
+        WDOG_PERIOD_SH, WDOG_PERIOD_W, WDOG_PERIOD_MASK,
+    )
+    assert WDOG_EN == 1 << 0
+    assert WDOG_KICK == 1 << 1
+    assert WDOG_TEST_FIRE == 1 << 31
+    assert WDOG_PERIOD_SH == 8 and WDOG_PERIOD_W == 16
+    assert WDOG_PERIOD_MASK == 0x00FF_FF00
+    # 예약 비트 [7:2] 와 [30:24] 가 어떤 필드와도 안 겹친다
+    used = WDOG_EN | WDOG_KICK | WDOG_TEST_FIRE | WDOG_PERIOD_MASK
+    assert used & 0x00_00_00_FC == 0, "예약 [7:2] 를 밟았다"
+    assert used & 0x7F00_0000 == 0, "예약 [30:24] 를 밟았다"
+
+
+def test_wdog_ctrl_word_packs_period_and_enable():
+    from tools.orbit_mmio_map import wdog_ctrl_word, WDOG_EN, WDOG_KICK
+    # PERIOD 와 EN 을 **한 번에** 쓴다 (spec 3절) — 나눠 쓰면 옛 창으로 터진다
+    w = wdog_ctrl_word(99)
+    assert (w >> 8) & 0xFFFF == 99
+    assert w & WDOG_EN and w & WDOG_KICK
+    assert wdog_ctrl_word(0, enable=False, kick=False) == 0
+
+
+def test_wdog_ctrl_word_rejects_out_of_range_period():
+    from tools.orbit_mmio_map import wdog_ctrl_word
+    with pytest.raises(ValueError):
+        wdog_ctrl_word(1 << 16)
+    with pytest.raises(ValueError):
+        wdog_ctrl_word(-1)
+
+
+def test_wdog_timeout_formula():
+    from tools.orbit_mmio_map import wdog_timeout_cycles, WDOG_PRESCALE
+    assert WDOG_PRESCALE == 1024
+    assert wdog_timeout_cycles(0) == 1024
+    assert wdog_timeout_cycles(1) == 2048
+    # 100MHz 기준 최대 창이 0.67초 근처여야 한다 (spec 1절 근거 숫자)
+    assert 0.6 < wdog_timeout_cycles(0xFFFF) / 100e6 < 0.7

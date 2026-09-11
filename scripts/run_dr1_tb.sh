@@ -17,6 +17,7 @@
 # 계산이 없는 두 모듈은 골든이 아니라 **프로토콜**이 기대값이다:
 #   rtl/axil_reg_bridge.sv    ↔  AMBA AXI4-Lite
 #   rtl/axi4_master_adapter.sv ↔ AMBA AXI4 (256 beat 상한 + 4KB 경계)
+#   rtl/wdog_timer.sv         ↔  spec/watchdog.md 2절 (파이썬 `WdogModel`)
 #
 # 사용:  bash scripts/run_dr1_tb.sh ; echo $?     # 0 이어야 한다
 # =============================================================================
@@ -75,6 +76,12 @@ run_one g2_ctrl_top    tb_dr1_host_e2e          $(ls rtl/*.sv rtl/dr1/*.sv)
 run_one axil_reg_bridge tb_axil_reg_bridge      rtl/axil_reg_bridge.sv
 # 보드 경로의 뒷단 — AXI4 마스터 (외부 메모리). 버스트 쪼개기가 계약이다
 run_one axi4_master_adapter tb_axi4_master_adapter rtl/axi4_master_adapter.sv
+# 워치독 — 멈춘 칩이 스스로 빠져나오는 유일한 길 (spec/watchdog.md)
+run_one wdog_timer     tb_wdog_timer            rtl/wdog_timer.sv
+run_one g2_ctrl_top    tb_g2_ctrl_top_wdog      $(ls rtl/*.sv rtl/dr1/*.sv)
+# **보드 최상위 전체** — 호스트 스택이 AXI4-Lite 만으로 DR1 을 돌린다 (PLAN W12 예행).
+# 보드에서 바뀌는 것은 백엔드 하나뿐이다.
+run_one dr1_soc_top    tb_dr1_soc_top           $(ls rtl/*.sv rtl/dr1/*.sv)
 
 # d=64 확장 — **같은 RTL 을 파라미터만 바꿔** 돌린다 (파일 복제 금지).
 # 스크래치를 8192 원소로 키워야 64x64 덤프가 들어간다 (spec/deltarule.md 3.6절).
