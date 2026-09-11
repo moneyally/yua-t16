@@ -35,8 +35,15 @@ module desc_fsm_v2 #(
   input  logic [7:0]  desc_bytes [0:DESC_SIZE-1],
   output logic        desc_ready,
 
-  // Queue class (which queue this descriptor came from)
+  // Queue class (which queue this descriptor came from).
+  // NOT consumed here. g2_ctrl_top already tags every trace event with the
+  // queue class from its own hold register (TEVT_DISPATCH/DONE/FAULT payload
+  // bits [17:16]; tools/orbit_trace.py decodes them). Keeping a second copy
+  // inside this FSM bought nothing and was removed — see the note below.
+  // The port stays: priority arbitration and fault routing will want it.
+  /* verilator lint_off UNUSEDSIGNAL */
   input  logic [1:0]  queue_class,   // 0=compute, 1=utility, 2=telemetry, 3=hipri
+  /* verilator lint_on UNUSEDSIGNAL */
 
   // Command output (to compute engines)
   output logic        cmd_valid,
@@ -108,12 +115,12 @@ module desc_fsm_v2 #(
   // CRC is checked in ST_CRC_CHECK via computed_crc vs latched[DESC_SIZE-1] directly
   logic [63:0] act_addr_r, wgt_addr_r, out_addr_r;
   logic [31:0] Kt_r;
-  // TODO: queue_class_r is latched but not yet consumed in skeleton.
-  // Will be used for: priority arbitration, trace event tagging, fault routing.
-  // Consumer logic to be added when desc_queue <-> desc_fsm_v2 integration happens.
-  /* verilator lint_off UNUSEDSIGNAL */
-  logic [1:0]  queue_class_r;
-  /* verilator lint_on UNUSEDSIGNAL */
+  // 2026-09-11: queue_class_r removed. It was latched and never read, behind a
+  // TODO claiming trace tagging was still owed — but g2_ctrl_top has tagged
+  // trace events with the queue class all along (trace_payload[17:16]).
+  // A dead register with a TODO reads like unfinished work and hides the fact
+  // that the feature exists. If priority arbitration lands here later, latch it
+  // then; the `queue_class` input port is still connected.
 
   // ---------------------------------------------------------------
   // Timeout counter
@@ -240,14 +247,12 @@ module desc_fsm_v2 #(
       wgt_addr_r    <= 64'd0;
       out_addr_r    <= 64'd0;
       Kt_r          <= 32'd0;
-      queue_class_r <= 2'd0;
     end else if (state == ST_DECODE) begin
       desc_opcode_r <= latched[0];
       act_addr_r    <= u64_le(16);
       wgt_addr_r    <= u64_le(24);
       out_addr_r    <= u64_le(32);
       Kt_r          <= u32_le(40);
-      queue_class_r <= queue_class;
     end
   end
 

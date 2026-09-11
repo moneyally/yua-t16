@@ -29,21 +29,46 @@
 - **검증 명령**: `bash scripts/run_dr1_tb.sh` → **17/17 ok (99 테스트)** ·
   `SYNTH_TIMEOUT=420 bash scripts/synth_gate.sh` → **PASS (exit 0)**,
   STAGE1 45/45, STAGE2 41/45, 셀 회귀 10% 초과 0 ·
-  `python3 -m pytest tests/ -q` → **333 passed, 8 xfailed** ·
+  `python3 -m pytest tests/ -q` → **336 passed, 8 xfailed** ·
   `python3 scripts/mutation_test.py` → **17/17 killed** ·
   `python3 scripts/check_banned_tokens.py rtl/*.sv rtl/*.v rtl/dr1/*.sv` → clean ·
   verilator 경고 신규 0건(g2_ctrl_top 17건은 전부 기존 것, 단독 린트와 수 동일).
 - **다음 세션 첫 작업**: (a) `DR1_CYCLES` 가 호스트 경로에서 **127** 이다(DESIGN 6.1 에
   기입). 126→127 은 디스크립터 디스패치 1사이클이고 AXI 를 지나도 안 변한다 —
-  줄이려면 DESIGN 6.3 의 남은 항목(스크래치 128비트화)을 본다. (b) `desc_fsm_v2` 의
-  `queue_class_r` 가 아직 소비되지 않는다 — 우선순위 중재/트레이스 태깅 중 **트레이스
-  태깅만** 하면 싸게 닫힌다. (c) `docs/RESEARCH.md` Q-F 는 **승인 대기** 그대로.
+  줄이려면 DESIGN 6.3 의 남은 항목(스크래치 128비트화)을 본다 — **이게 다음 세션의
+  첫 일감이다.** (b) ~~`desc_fsm_v2` 의 `queue_class_r`~~ — 같은 세션에서 닫았다
+  (아래 블록 참조: 태깅은 이미 되고 있었고 죽은 레지스터를 지웠다).
+  (c) `docs/RESEARCH.md` Q-F 는 **승인 대기** 그대로.
 - **결정 필요**: (1) **PCIe 를 어떻게 할지.** 내 판단으로는 `pcie_ep_versal` 을
   "ORBIT-DR1 범위 밖(다른 보드용 유물)" 으로 문서에 못박고 더 안 건드리는 게 맞다.
   지금처럼 "스텁" 으로 두면 계속 빚처럼 보인다. (2) **보드 구매** — 위임 범위 밖이다.
   0~3단계 종료 기준은 충족됐다고 본다(호스트 경로 골든 비트 일치, 합성 게이트 통과,
   보드 최상위 시뮬레이션 통과). PLAN W11 결정 게이트는 정원 몫.
   (3) 워치독 기본 PERIOD 를 호스트가 뭘로 잡을지 — 지금은 호스트가 매번 정한다.
+
+### 같은 세션, 이어서 — 남은 "스텁" 의 성격을 가른다
+
+- `desc_fsm_v2` 의 `queue_class_r` 를 **지웠다.** TODO 는 "트레이스 태깅에 쓸 것"
+  이라고 했는데, `g2_ctrl_top` 이 진작부터 모든 트레이스 이벤트에 큐 클래스를
+  달고 있었다 (`trace_payload[17:16]`, `tools/orbit_trace.py` 가 디코드).
+  **죽은 레지스터 + 틀린 TODO 가 "아직 안 한 일"처럼 보이게 하고 있었다.**
+  입력 포트는 남겼다 (우선순위 중재가 오면 그때 래치한다).
+- `pcie_ep_versal`/`g2_protob_top`/G3 학습 디스패치/`scale_fabric_ctrl` PHY 를
+  README 의 **"범위 밖 — 스텁이 아니라 안 쓰는 길"** 표로 옮겼다. 끝낼 계획이
+  없는 것을 "스텁" 으로 두면 계속 빚처럼 보인다. **정원이 다르게 판단하면 되돌린다.**
+- **d=64 함정을 테스트로 못 박았다**: 스크래치 한계가 둘(RTL `DEPTH` / MMIO 창
+  10비트 디코드)인데 지금 우연히 같은 값 1024 다. `DEPTH` 만 8192 로 올리면
+  `delta_dump` 가 조용히 0 을 읽는다. `tests/test_mmio_map.py` 가 둘이 어긋나면
+  먼저 운다. `spec/deltarule.md` 3.6 에 이유를 적었다. (지금은 `dr1_scratch_layout(64)`
+  가 `ValueError` 로 막아서 실제 사고는 안 난다 — 확인했다.)
+- README 의 낡은 숫자를 실측으로 고쳤다 (테스트 수, 셀 수, 파일 수, 뮤턴트 수).
+
+검증: `bash scripts/run_dr1_tb.sh` → **17/17 ok** · `SYNTH_TIMEOUT=420 bash
+scripts/synth_gate.sh` → **PASS**, 셀 회귀 없음(새 기준선 항목 0) ·
+`python3 -m pytest tests/ -q` → **336 passed, 8 xfailed** ·
+`python3 scripts/mutation_test.py` → **17/17 killed**.
+
+---
 
 ## 2026-09-11 (세션 11, 자율 위임) — W7~W11: DELTA_STEP 완성 · 호스트 E2E · 보드 前 준비
 

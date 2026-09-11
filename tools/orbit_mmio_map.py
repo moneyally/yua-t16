@@ -294,8 +294,19 @@ UQ15_ONE        = 0x8000  # UQ1.15 에서 1.0 (정확)
 
 # ── DR1 스크래치 (spec/deltarule.md 3.6절) ─────────────────────────
 DR1_SCRATCH_BASE  = 0x8033_1000   # MMIO 창. 32비트 워드 하나 = Q1.15 원소 하나
-DR1_SCRATCH_WORDS = 1024          # 원소 개수 (rtl/dr1/dr1_scratch.sv DEPTH 와 같아야 한다)
-DR1_SCRATCH_END   = DR1_SCRATCH_BASE + DR1_SCRATCH_WORDS * 4 - 4
+
+# **두 개의 한계가 우연히 같은 값이다. 헷갈리지 말 것.**
+#   DR1_SCRATCH_MMIO_WORDS — 호스트가 **닿을 수 있는** 원소 수. `rtl/reg_top.sv` 의
+#       `dr1_scr_addr` 이 10비트이고 `A_DR1_SCR_END = 0x3_1FFC` 가 딱 이만큼을 덮는다.
+#   DR1_SCRATCH_WORDS      — RTL 스크래치의 실제 깊이 (`rtl/dr1/dr1_scratch.sv` DEPTH).
+#
+# d=64 로 키우려면 **둘 다** 늘려야 한다. RTL DEPTH 만 8192 로 올리고 이 값을 따라
+# 올리면, 호스트는 1024 원소 너머를 영영 못 읽는데 아무도 모른다 (창 밖 읽기는
+# 0 으로 떨어진다). 그래서 `tests/test_mmio_map.py` 가 둘이 같은지 검사한다 —
+# 다르게 만들려면 `reg_top` 의 디코드 폭을 먼저 넓히고 그 테스트를 고쳐야 한다.
+DR1_SCRATCH_MMIO_WORDS = 1024
+DR1_SCRATCH_WORDS = 1024
+DR1_SCRATCH_END   = DR1_SCRATCH_BASE + DR1_SCRATCH_MMIO_WORDS * 4 - 4
 DR1_DUMP_ELEM     = 512           # DELTA_DUMP 기본 목적지 (원소 인덱스)
 
 

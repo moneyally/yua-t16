@@ -44,7 +44,7 @@
 고쳐야 하는 것 (우선순위 순):
 - ~~**`real` 타입 사용 모듈 7개 — 합성 불가.**~~ **2026-09-10 W1-1 완료:** 7개(`collective_engine`, `gemm_int4`, `loss_scaler`, `moe_router`, `optimizer_unit`, `vpu_core`, `vpu_fp16_utils`) + 이들에 의존하는 상위 모듈을 `rtl/behavioral/` 로 격리했다. 테스트벤치는 `tb/behavioral/`, `sim/cocotb/behavioral/`. `rtl/*.sv` 는 이제 금지 토큰 0건.
 - **합성 게이트를 막는 진짜 원인은 `real` 이 아니었다 — unpacked array 포트다.** yosys 내장 프론트엔드(0.33·0.69)가 파싱하지 못한다. 합법 SystemVerilog 이고 Vivado 는 합성하므로 **RTL 을 고치지 않고 `sv2v` 전처리를 게이트에 넣는다** (`scripts/synth_gate.sh`). 일일 게이트는 sv2v→yosys, **최종 합성 판정은 Vivado.**
-- `pcie_ep_versal.sv`: CPM AXI-Stream 포트가 스텁. 비트스트림은 생성됐지만 호스트와 통신한 적 없음.
+- ~~`pcie_ep_versal.sv`: CPM AXI-Stream 포트가 스텁.~~ **2026-09-11 판정: 범위 밖.** Versal CPM 전용인데 타깃 보드가 KV260(Zynq MPSoC)이다. 호스트는 PS 의 AXI4-Lite 로 들어온다 (`dr1_soc_top`, `tb/tb_dr1_soc_top.py` 6/6). CQ→BAR TLP 디코드를 지금 쓰면 PG347 도 보드도 없어 **검증할 방법이 없는 코드**가 된다 — 규칙 6·7 에 어긋난다. README "범위 밖" 표에 이유를 적었다. **정원이 다르게 판단하면 되돌린다** (LOG 결정 필요 (1)).
 - ~~외부 메모리(DDR/HBM) 경로 없음. `dma_bridge`는 상태머신이고 실제 메모리 인터페이스가 아님.~~ **2026-09-11 완료(시뮬레이션 한정):** `rtl/axi4_master_adapter.sv` 가 `rd_req_*`/`wr_req_*` 를 AXI4 마스터로 바꾼다 — 256 beat 상한과 4KB 경계에서 버스트를 쪼갠다. `rtl/dr1_soc_top.sv` 에 결선됨(전에는 tie-off). 검증: `python3 tb/run_tb.py axi4_master_adapter tb_axi4_master_adapter rtl/axi4_master_adapter.sv` = 8/8, 슬레이브 모델이 프로토콜 위반을 assert 한다. **보드의 실제 DDR 에 붙여 본 적은 없다 — 미검증.**
 - `mxu_bf16_128x128`은 16×16 타일 1개를 64회 반복 — 연산기 수는 256개. 이름이 실체보다 크다.
 - **README 과장 — `docs/AUDIT.md` §5 에 21건 목록.** 실제 문구는 다음이다 (2026-09-10 감사, 명령 출력 첨부됨):
