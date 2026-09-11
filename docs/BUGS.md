@@ -384,9 +384,10 @@ Warning: multiple conflicting drivers for desc_fsm_v2.\fault_code_r [7]:
 
 ---
 
-## BUG-008 — verilator 복구로 드러난 기존 테스트 실패 6건 (전부 미수정)
+## BUG-008 — verilator 복구로 드러난 기존 테스트 실패 6건
 
-**상태**: **재현 완료 · 미수정.** 원인 분석 안 함.
+**상태**: 008a **부분 해결**(2/3) · 008b **해결** · 008c~f **미수정**.
+**2026-09-11 판정: 008a/008b 는 RTL 이 아니라 테스트벤치 버그였다.**
 **어떻게 드러났나**: verilator 5.034 를 소스 빌드해서 `tb/` 38개를 처음으로 전부 돌렸다.
 그 전까지는 **하나도 실행할 수 없었다** (`docs/AUDIT.md` §4).
 
@@ -401,12 +402,67 @@ PASS 32 / TESTFAIL 5 / BUILDERR 1   (테스트벤치 38개)
 
 | # | 테스트벤치 | DUT | 증상 | 우선순위 |
 |---|---|---|---|---|
-| 008a | `tb_cdc_fifo_async` | `cdc_fifo` | `Mismatch at 0: wrote 0xdead0000, read 0x0` — **데이터가 통과하지 않는다** | **높음** |
-| 008b | `tb_cdc_fifo_reset` | `cdc_fifo` | `Data corruption after reset: assert 0 == 3405643777` | **높음** |
+| 008a | `tb_cdc_fifo_async` | `cdc_fifo` | ~~`Mismatch at 0: wrote 0xdead0000, read 0x0`~~ → **테스트벤치 샘플링 버그. 2/3 해결.** 남은 1건은 세그폴트 (아래) | 해결(부분) |
+| 008b | `tb_cdc_fifo_reset` | `cdc_fifo` | ~~`Data corruption after reset`~~ → **같은 원인. 해결.** | ✅ 해결 |
 | 008c | `tb_oom_guard_thresholds` | `oom_guard` | `Expected PRESSURE, got 0` — `pressure_state` 가 전이하지 않는다 (2/2 실패) | 중 |
 | 008d | `tb_oom_guard_race` | `oom_guard` | 2/3 실패 (같은 모듈) | 중 |
 | 008e | `tb_trace_ring_wrap` | `trace_ring` | `head should have advanced, got 0` | 중 |
 | 008f | `tb_g3_desc_fsm` | `g3_desc_fsm` | `fault_code assert 1 == 4` — 미지원 opcode 가 `0x04` 대신 `0x01` 을 낸다 | 낮음 (G3 경로) |
+
+### 008a / 008b 판정 — **`cdc_fifo` RTL 은 정상이다**
+
+진단용 프로브를 붙여 `rd_valid` 를 계속 1 로 두고 매 사이클 관측했다:
+
+```
+cyc | rd_ready | rd_data
+  0 |        1 | 0xdead0000
+  1 |        1 | 0xdead0001
+  ...
+  6 |        1 | 0xdead0006
+  7 |        0 | 0xdead0007     <- 8개가 순서대로 전부 나온다
+```
+
+**FIFO 는 8개를 순서대로 정확히 내보낸다.** 문제는 테스트벤치의 샘플링 타이밍이었다.
+
+두 가지를 놓치고 있었다:
+
+1. **`rd_data` 는 레지스터 출력이다** (`rtl/cdc_fifo.sv` 의 "registered output for
+   cleaner timing"). `await RisingEdge` 직후에 읽으면 논블로킹 대입이 반영되기 전이라
+   **이전 사이클 값**을 본다. 첫 읽기에서 리셋값 `0x0` 을 본 것이 이 때문이다.
+2. **`rd_ready`(=`~empty`) 도 레지스터 출력이다.** rising edge N 의 핸드셰이크는
+   *N 직전* `rd_ready` 로 결정되는데, edge 직후에 보이는 값은 *N+1* 용이다.
+   이걸 맞추지 않으면 마지막 1개를 놓친다 (8개 중 7개).
+
+수정: falling edge 에서 샘플링하는 `read_n()` 헬퍼로 교체했다. falling F_n 에서는
+`rd_data` 가 R_n 핸드셰이크의 결과이고 `rd_ready` 는 R_{n+1} 의 핸드셰이크 여부다.
+시드를 잡을 때 rising edge 를 소비하면 핸드셰이크 1개를 잃으므로 falling 으로 시드한다.
+
+```
+$ python3 tb/run_tb.py cdc_fifo tb_cdc_fifo_reset rtl/cdc_fifo.sv
+** TESTS=1 PASS=1 FAIL=0 SKIP=0 **                      <- 008b 해결
+
+$ python3 tb/run_tb.py cdc_fifo tb_cdc_fifo_async rtl/cdc_fifo.sv
+tb_cdc_fifo_async.test_basic_async_rw   passed          <- 008a 해결
+tb_cdc_fifo_async.test_full_empty_flags passed
+tb_cdc_fifo_async.test_continuous_streaming ... rc=-11  <- 남음 (008a-3)
+```
+
+### 008a-3 — `test_continuous_streaming` 세그폴트 (미해결, 시간 박스 종료)
+
+`test_continuous_streaming` 이 verilator 에서 **SIGSEGV(rc=-11)** 로 죽는다.
+테스트 3번이 시작만 하고 pass/fail 을 출력하지 못한다 — **테스트 도중 크래시**다
+(종료 시점이 아니다).
+
+시도했고 효과 없었던 것: 테스트 끝에서 `producer`/`consumer` 태스크를 `cancel()` 하고
+`wr_valid`/`rd_valid` 를 내리기.
+
+이 테스트는 `cocotb.start_soon` 으로 코루틴 두 개를 띄우고 `consumer` 안에
+`if len(read_data) == 0: await Timer(500, "ns")` 라는 사실상 무한 대기 분기가 있다.
+**RTL 문제라는 근거는 없다** (같은 DUT 로 다른 두 테스트가 통과한다).
+verilator/cocotb 조합의 문제인지 테스트 구조 문제인지 아직 가르지 못했다.
+
+**다음에 할 일**: 이 테스트를 코루틴 없이 단일 루프로 다시 쓰고, 그래도 죽으면
+최소 재현 케이스를 만들어 verilator 쪽 이슈인지 확인한다.
 
 ### 왜 이게 중요한가
 

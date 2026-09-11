@@ -7,7 +7,7 @@ Tests:
 """
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import RisingEdge, Timer
+from cocotb.triggers import FallingEdge, ReadOnly, RisingEdge, Timer
 
 
 async def reset_fifo(dut):
@@ -20,6 +20,38 @@ async def reset_fifo(dut):
     dut.wr_rst_n.value = 1
     dut.rd_rst_n.value = 1
     await Timer(100, unit="ns")
+
+
+async def read_n(dut, n, guard=60):
+    """cdc_fifo 에서 n 개를 읽는다. 타이밍 두 가지를 맞춰야 한다.
+
+    1. `rd_data` 는 **레지스터 출력**이다 (rtl/cdc_fifo.sv "registered output").
+       RisingEdge 직후에 읽으면 논블로킹 대입 전이라 **이전 값**을 본다.
+    2. `rd_ready`(=~empty) 도 레지스터 출력이다. rising edge N 의 핸드셰이크는
+       **N 직전** rd_ready 로 결정되고, 그 결과 데이터는 **N 직후** rd_data 에 나온다.
+
+    그래서 falling edge 에서 샘플링한다. falling F_n (R_n 과 R_{n+1} 사이)에서:
+        rd_data  = R_n 핸드셰이크의 결과
+        rd_ready = R_{n+1} 에서 핸드셰이크가 일어날지
+    따라서 "직전 falling 의 rd_ready" 가 이번 rd_data 의 유효성이다.
+    시드는 rising edge 를 소비하면 안 된다 (핸드셰이크 1개를 잃는다).
+
+    예전 테스트는 1번을 놓쳐 첫 읽기에서 리셋값 0 을 보고 실패했다
+    (docs/BUGS.md BUG-008a/b). **RTL 은 정상이다** — 8개가 순서대로 나온다.
+    """
+    out = []
+    dut.rd_valid.value = 1
+    await FallingEdge(dut.rd_clk)          # rising 을 소비하지 않는 시드
+    prev_ready = int(dut.rd_ready.value)
+    for _ in range(guard):
+        await FallingEdge(dut.rd_clk)
+        if prev_ready:
+            out.append(int(dut.rd_data.value))
+            if len(out) >= n:
+                break
+        prev_ready = int(dut.rd_ready.value)
+    dut.rd_valid.value = 0
+    return out
 
 
 @cocotb.test()
@@ -59,10 +91,5 @@ async def test_reset_during_traffic(dut):
 
     await Timer(200, unit="ns")
 
-    dut.rd_valid.value = 1
-    for _ in range(10):
-        await RisingEdge(dut.rd_clk)
-        if dut.rd_ready.value == 1:
-            assert int(dut.rd_data.value) == 0xCAFE_0001, "Data corruption after reset"
-            break
-    dut.rd_valid.value = 0
+    got = await read_n(dut, 1)
+    assert got and got[0] == 0xCAFE_0001, f"Data corruption after reset: got {got}"

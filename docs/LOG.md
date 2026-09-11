@@ -2,6 +2,118 @@
 
 ---
 
+## 2026-09-11 (세션 5, 자율모드) — 현재 주차 3 · cdc_fifo 판정 · OOM 테스트 · W3-1 골든 모델
+
+**한 것**: PLAN 현재 주차 → 3. **BUG-008a/b 는 RTL 이 아니라 테스트벤치 버그로 판정** (2/3 + 1/1 해결). `oom_alloc_dec` 가 done_err 경로에서 정확히 1회 감소하는 테스트가 **없었고, 추가해서 3/3 통과**. **W3-1 `sim/golden/deltarule.py` 완성** — 자체 테스트 전부 통과.
+**안 된 것**: `tb_cdc_fifo_async.test_continuous_streaming` 이 verilator 에서 **SIGSEGV(rc=-11)** — 시간 박스 종료, `docs/BUGS.md` 008a-3 에 남기고 넘어감. BUG-008c~f(oom_guard 4건, trace_ring 1건, g3_desc_fsm 1건) 미착수.
+**실행한 검증 명령**: `python3 sim/golden/deltarule.py` → 전부 통과 / `python3 tb/run_tb.py g2_ctrl_top tb_g2_ctrl_top_oom_fault $(ls rtl/*.sv)` → 3/3 PASS / `python3 -m pytest tests/ -q` → 3 failed, 247 passed, 5 xfailed. **RTL 파일은 하나도 건드리지 않았다** (`git status --short rtl/` 비어 있음) — 지시대로.
+**다음 세션 첫 작업**: W3-2 `tests/test_golden_deltarule.py` (불변조건 I1~I5 를 골든 모델 수준에서, d=16·64).
+**사용자 결정 필요**: 2건 — DESIGN.md 2절 문구 보완, `o` 오차 기준 (아래).
+
+---
+
+### GitHub 확인
+
+- **PR 0건** (열림·닫힘 모두 없음)
+- **CI 워크플로 0개** (`.github/` 없음)
+- 브랜치: `main`, `claude/hyo-r7u3an`(+9), **`spec-v1`** — G1 시절 옛 분기로 main 에 병합된 적 없다. 정리 여부는 결정 사항이 아니라 그냥 기록만.
+
+### BUG-008a/b — **`cdc_fifo` RTL 은 정상이었다**
+
+프로브를 붙여 `rd_valid` 를 계속 1 로 두고 매 사이클 관측:
+
+```
+cyc | rd_ready | rd_data
+  0 |        1 | 0xdead0000
+  ...
+  6 |        1 | 0xdead0006
+  7 |        0 | 0xdead0007     <- 8개가 순서대로 전부 나온다
+```
+
+문제는 테스트벤치 샘플링이었다. 두 가지를 놓치고 있었다:
+
+1. `rd_data` 는 **레지스터 출력**이다. `await RisingEdge` 직후에 읽으면 논블로킹 대입 전이라 **이전 값**을 본다 → 첫 읽기에서 리셋값 `0x0`.
+2. `rd_ready`(=`~empty`) **도** 레지스터 출력이다. rising edge N 의 핸드셰이크는 *N 직전* `rd_ready` 로 정해지는데 edge 직후에 보이는 값은 *N+1* 용이다 → 마지막 1개를 놓친다 (8개 중 7개).
+
+falling edge 에서 샘플링하는 `read_n()` 헬퍼로 고쳤다. `tb_cdc_fifo_reset` **1/1 PASS**, `tb_cdc_fifo_async` **2/3 PASS**.
+
+남은 1건(`test_continuous_streaming`)은 **테스트 도중 세그폴트**다 (pass/fail 도 못 찍는다). 코루틴 정리를 넣어봤지만 효과 없었다. 같은 DUT 로 다른 두 테스트가 통과하므로 **RTL 문제라는 근거는 없다.** 시간 박스대로 여기서 멈췄다.
+
+### BUG-001 보완 — `oom_alloc_dec` 테스트
+
+**그런 테스트는 없었다.** `tb/tb_g2_ctrl_top_oom_fault.py` 를 새로 썼다.
+`rtl/oom_guard.sv:73` 의 카운터는 **레벨 감지**라 `alloc_dec` 가 1인 사이클마다 감소한다 —
+"정확히 1사이클, 정확히 1회"가 안 지켜지면 사용량이 어긋난다.
+
+```
+ILLEGAL: usage 0 -> 0, alloc_dec high cycles = 1     <- fault(done_err) 경로
+NOP:     usage 0 -> 0, alloc_dec high cycles = 1     <- 성공(done_ok) 경로 (대조군)
+fault #0..#3: usage = 0                              <- 4회 반복해도 누수 없음
+** TESTS=3 PASS=3 FAIL=0 SKIP=0 **
+```
+
+`ST_FAULT → ST_DONE` 을 남긴 판단이 옳았다는 근거가 이제 테스트로 고정됐다.
+
+### W3-1 — `sim/golden/deltarule.py`
+
+`step(S, q, k, v, alpha, beta) -> (S_next, o, sat_count)`. 전부 numpy 정수 연산이다.
+float 로 계산한 뒤 변환하지 않는다 (DESIGN.md 3절).
+
+**DESIGN.md 2절 "정확한 식" 을 하드웨어 한 줄로 접었다.** 문서가 경고한 대로
+`err = v − p` 는 α=1 일 때만 맞다. 정확한 전개 `S_t = α·S − α·β·p·kᵀ + β·v·kᵀ` 는
+
+    S_t = α·S + β·(v − α·p)·kᵀ
+
+로 **정확히** 접히므로 **`err = v − α·p`** 를 쓴다. 모든 α 에서 정확하고, 여전히
+"스케일 1회 + 외적 누산 1회"라 하드웨어 구조가 바뀌지 않는다.
+
+**연산 순서를 한 번 고쳤다.** 처음엔 `α·S` 와 `berr·kᵀ` 를 각각 Q1.15 로 내린 뒤 더했는데
+재양자화가 2번 일어나 오차가 **1.06~1.08 LSB** 로 기준을 넘었다. Q2.30 누산기 안에서
+더하고 **마지막에 한 번만** 내리도록 바꾸니 **0.63~0.66 LSB** 로 떨어졌다.
+이 순서는 DESIGN.md 8절의 `"acc 초기값을 α·S 행으로 로드하는 경로 추가"` 와 일치한다.
+**기준을 늘리지 않고 구현을 고쳤다.**
+
+자체 테스트 (`python3 sim/golden/deltarule.py`):
+
+```
+  round-half-to-even        OK  (10 케이스)
+  포화(saturate)             OK  (경계 3케이스, SAT 카운트 일치)
+  불변조건 I2/I3/I5 (d=16)   OK
+  불변조건 I2/I3/I5 (d=64)   OK
+  float 대비 (d=16)  OK   S 0.634 / o(고립) 0.499 LSB   [기준 1 LSB]
+                     참고: o(전체) 1.064 LSB — S 양자화가 16회 누산으로 전파된 것. 게이트 아님
+  float 대비 (d=64)  OK   S 0.661 / o(고립) 0.500 LSB   [기준 1 LSB]
+                     참고: o(전체) 1.254 LSB — S 양자화가 64회 누산으로 전파된 것. 게이트 아님
+   100토큰 드리프트 (d=16)       2.1 LSB, 포화 0회  — 관측용
+    20토큰 드리프트 (d=64)       2.4 LSB, 포화 0회  — 관측용
+=== 전부 통과 ===
+```
+
+---
+
+## 결정 필요 v3
+
+**#1 — DESIGN.md 2절 문구 보완?**
+2절 본문의 하드웨어 전개가 `err = v_t − p` 로 적혀 있고, 바로 아래 "주의"가 그게 α=1 에서만
+맞다고 경고한다. 골든 모델은 정확한 쪽(`err = v − α·p`)을 구현했다.
+**본문을 `err = v − α·p` 로 고치면 주의 문단과 본문이 한 식으로 합쳐진다.**
+SSOT 라서 임의로 안 고쳤다. 승인하면 2절을 그렇게 정리한다.
+
+**#2 — `o` 의 float 오차 기준**
+PLAN W3-1 은 "1 LSB 이내"라고 했는데, `o` 를 **순수 float 경로와 끝까지** 비교하면
+d=16 에서 1.06, d=64 에서 1.25 LSB 다. 이건 `o` 계산의 오차가 아니라 **S 의 양자화 오차가
+d 번 누산으로 전파된 것**이고, d 가 커지면 반드시 커진다. 1 LSB 로 묶을 수 없다.
+
+그래서 자체 테스트는 이렇게 나눴다:
+- **게이트**: S 오차 ≤1 LSB, o 오차(고립: 정수 S_next 기준) ≤1 LSB → 둘 다 통과
+- **관측**: o 오차(전체), N토큰 드리프트 → 숫자만 보고
+
+근거: DESIGN.md 7절의 RTL 검증은 **골든 모델과 비트 일치**다. 둘 다 정수라 float 드리프트는
+판정에 안 쓰인다. float 비교는 부호·시프트 같은 굵직한 실수를 잡는 용도다.
+**이 분리에 동의하시면 PLAN W3-1 문구를 그렇게 조정하겠다.**
+
+---
+
 ## 2026-09-11 (세션 4, 자율모드) — W1-3 · verilator 복구 · W2-1 README · BUG-001 수정
 
 **한 것**: 4건 순서대로 전부. `docs/LINT.md`(W1-3) / verilator 5.034 소스 빌드 + `scripts/setup_tools.sh` → **기존 tb 38개 중 32개 실행 복구** / README 전면 재작성(W2-1) / **BUG-001 수정** (DESIGN.md 5.1절 완료 신호 계약 신설 후 RTL).
