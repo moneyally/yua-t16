@@ -2,6 +2,38 @@
 
 ---
 
+## 2026-09-11 (세션 10, 자율모드) — 참고문헌 출처 · 기준선 사실 보강 · W6
+
+### 참고문헌 출처 (규칙 7 — 어디서 얻었는가)
+
+**2608.15533 DeltaLog** — 두 경로로 얻었다.
+1. 세션 9 에서 `WebSearch` 질의 **"arXiv 2608.15533 DeltaLog Deferred Materialization of Recurrent States"** 를
+   직접 실행했고, 결과 링크 목록 첫 줄이 이것이었다:
+   `{"title":"[2608.15533] DeltaLog: Deferred Materialization of Recurrent States for Linear Attention Decoding",`
+   `"url":"https://arxiv.org/abs/2608.15533"}`.
+   같은 결과의 요약에 저자 **Junqing Lin, Jingwei Sun, Guangzhong Sun**, 제출일 **2026-08-16**,
+   "represents the recurrent state as a dense base state together with a bounded log of recent compact updates",
+   "periodic merge steps fold the accumulated updates back into the dense base state" 가 있었다.
+2. 정원이 **arXiv 페이지를 직접 열어 확인**(2026-09-11): cs.DC, 2026-08-16, Lin/Sun/Sun,
+   초록에 커널 **1.86×**, 상태 쓰기 트래픽 **7.83×**, end-to-end **1.05~1.20×**, GDN/KDA/RWKV6.
+   → **GPU 서빙 스택용 소프트웨어**이지 하드웨어 가속기가 아니라는 점을 `PRIOR_ART.md` 3.1 에 명시했다.
+
+**2608.22354 SANE** — 출처가 더 약했다. **전용 검색을 한 적이 없다.**
+위 DeltaLog 질의의 결과 링크 목록에 섞여 나온 한 줄이 전부였다:
+`{"title":"SANE: State Anomaly Neutralization for Stable Extreme-Context Delta-Rule Models",`
+`"url":"https://arxiv.org/html/2608.22354"}`.
+즉 세션 9 시점에 내가 가진 것은 **제목과 URL 뿐**이었고, 저자·날짜·초록은 몰랐다.
+그래서 PRIOR_ART 초판에 "제목·초록 수준만 확인" 이라고 적었다.
+2026-09-11 정원이 **직접 확인**: cs.LG, **2026-08-23 (v2 08-25)**, **Lin/Xu/Liu/Hao/Cai**,
+초록 요지 — RWKV-7 1억 토큰에서 **국소 채널 노름 폭발**(전체 포화 아님), **청크 경계 tanh 적응 압축
+(3 ≤ α ≤ 5)**, **α ≥ 8 은 안정하나 추론 상실**. → 실재 확인, "미검증" 표시 해소.
+
+**교훈**: 검색 결과 *목록에 섞여 나온 제목*은 "검색으로 확인" 이 아니다.
+`PRIOR_ART.md` 0절에 출처 등급 **[검색] / [사용자] / [추정]** 을 도입했다.
+논문 **본문은 여전히 한 편도 못 읽었다** — arxiv.org 가 이 컨테이너에서 egress 프록시에 막힌다.
+
+---
+
 ## 2026-09-11 (세션 9, 자율모드) — W5 RTL 4개 · 신규성 주장 철회
 
 - **한 것**: 골든을 RTL 단위로 분해(`requantize_q15`/`matvec`/`update_row`/`compute_err`, `step()` 은 조합만) → `rtl/dr1/` 4개 모듈(`requant_q15` 172셀, `state_sram` 8,516셀 `$mem_v2 x1`, `vec_regs` 3,202셀, `matvec_unit` 34,968셀) + tb 4개 전부 골든 비트 일치, `tools/orbit_pack.py`(평탄화 규칙 SSOT), 게이트에 `--check-mem`, DESIGN 6.1 실측표(`matvec_unit` = **19사이클 = D+3**, 계약 상한 20). 그리고 **DESIGN 1절 신규성 주장 철회** — 선행 연구 arXiv 2603.05931 인용 + `docs/PRIOR_ART.md` 신설(5편).

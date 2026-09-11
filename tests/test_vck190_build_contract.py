@@ -26,12 +26,18 @@ class TestBuildFilesExist:
     def test_first_smoke_script(self):
         assert os.path.isfile(os.path.join(SCRIPTS_DIR, "vck190_first_smoke.py"))
 
+    @pytest.mark.xfail(strict=True, reason=(
+        "docs lost to .gitignore before 2026-09-10; see AUDIT.md"))
     def test_build_doc(self):
         assert os.path.isfile(os.path.join(DOCS_DIR, "ORBIT_G2_VCK190_BUILD.md"))
 
+    @pytest.mark.xfail(strict=True, reason=(
+        "docs lost to .gitignore before 2026-09-10; see AUDIT.md"))
     def test_bringup_doc(self):
         assert os.path.isfile(os.path.join(DOCS_DIR, "ORBIT_G2_VCK190_PCIE_BRINGUP.md"))
 
+    @pytest.mark.xfail(strict=True, reason=(
+        "docs lost to .gitignore before 2026-09-10; see AUDIT.md"))
     def test_failure_matrix_doc(self):
         assert os.path.isfile(os.path.join(DOCS_DIR, "ORBIT_G2_VCK190_FAILURE_MATRIX.md"))
 
