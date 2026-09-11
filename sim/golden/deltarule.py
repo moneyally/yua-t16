@@ -551,6 +551,44 @@ def drift_over_tokens(d, n_tokens, rng, seed_state=None):
     return drift, total_sat
 
 
+def drift_series(d, n_tokens, rng, checkpoints, alpha_range=(0.80, 0.999),
+                 beta_range=(0.05, 0.30)):
+    """토큰을 돌리며 **체크포인트마다** 정수-float 드리프트(LSB)를 기록한다.
+
+    `drift_over_tokens` 는 끝점 하나만 준다. 그걸로는 **가장 중요한 질문**에 답할 수
+    없다: 드리프트가 **수렴하는가, 발산하는가?**
+
+    이 레포의 북극성은 "상태가 연산기 옆에 상주하고 토큰이 지나가며 제자리에서
+    갱신되는" 유닛이다. 상태가 오래 머무는 것이 전제이므로, **긴 시퀀스에서
+    Q1.15 상태가 실수 델타룰을 계속 따라가는지**가 설계의 생사를 가른다.
+    RTL 이 골든과 비트 일치한다는 사실은 이 질문에 아무 답도 주지 않는다.
+
+    α < 1 이라 옛 오차는 α^n 으로 사그라든다 → 평탄해져야 한다. 실측은
+    `docs/DESIGN.md` 6.5절 표에 있다 (α ≤ 0.99 에서 토큰 수와 무관하게 ~2 LSB).
+
+    반환: ({체크포인트: 드리프트 LSB}, 총 포화 횟수)
+    """
+    f = q15_to_float
+    ckpts = set(int(c) for c in checkpoints)
+    S_i = np.zeros((d, d), dtype=np.int64)
+    S_f = np.zeros((d, d), dtype=np.float64)
+    out = {}
+    total_sat = 0
+    for t in range(1, int(n_tokens) + 1):
+        qv, kv, vv = random_vec(rng, d), random_vec(rng, d), random_vec(rng, d)
+        a = float_to_q15(rng.uniform(*alpha_range))
+        b = float_to_q15(rng.uniform(*beta_range))
+        S_i, _, n = step(S_i, qv, kv, vv, a, b)
+        total_sat += n
+        S_f, _ = step_float(S_f, np.vectorize(f)(qv), np.vectorize(f)(kv),
+                            np.vectorize(f)(vv), f(a), f(b))
+        if t in ckpts:
+            out[t] = float(
+                np.max(np.abs(S_i.astype(np.float64) / ONE_Q15 - S_f)) * ONE_Q15
+            )
+    return out, total_sat
+
+
 def self_test(verbose=True):
     """PLAN W3-1 자체 테스트. 실패하면 AssertionError."""
     rng = np.random.default_rng(20260911)

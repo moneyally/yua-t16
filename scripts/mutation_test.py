@@ -141,6 +141,19 @@ MUTANTS = [
         "포화를 세지 않는다. DR1_SAT_COUNT 가 항상 0 이 되고 I4 가 죽는다.",
     ),
 
+    # ── 발산 검사가 실제로 무는지 (오라클: tests/test_golden_drift.py) ──
+    # 드리프트 테스트는 "버그" 가 아니라 **설계 성질**(Q1.15 가 긴 문맥에서
+    # 충분한가)을 지킨다. 그 테스트가 이빨이 있는지 여기서 계속 확인한다.
+    Mutant(
+        "state_never_decays",
+        "        acc = _sat_acc(a * int(S_row[j]), sat)",
+        "        acc = _sat_acc(ONE_Q15 * int(S_row[j]), sat)",
+        "정수 경로가 α 를 무시해서 **안 잊는다**. float 경로는 잊으므로 "
+        "드리프트가 토큰 수에 따라 자란다 — 상태 고정 설계가 무너지는 그 모양이다.",
+        oracle="tests/test_golden_drift.py",
+        quick=True,
+    ),
+
     # ── 워치독 레지스터 헬퍼 (spec/watchdog.md 가 정답지) ──────────────
     # 왜 여기 있나: 이 비트 배치는 **한 번 정하면 안 바뀌는 코드**다. 틀려도
     # 파이썬은 멀쩡히 돌고 RTL 도 멀쩡히 돌고, 보드에서만 안 맞는다.

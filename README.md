@@ -18,11 +18,12 @@ SystemVerilog RTL 과 Python 호스트 스택. **시뮬레이션 단계이며 �
 | 제어 평면 — `reg_top`, `desc_queue`, `desc_fsm_v2`, `irq_ctrl`, `trace_ring`, `oom_guard`, `reset_seq`, `wdog_timer`, `cdc_fifo` | **합성됨** | `g2_ctrl_top` 885,790 cells (DR1 포함) |
 | **워치독** — `wdog_timer` | **동작** | `tb/tb_wdog_timer.py` 7/7 (사이클 단위로 파이썬 모델과 대조) + `tb/tb_g2_ctrl_top_wdog.py` 6/6 (레지스터→리셋→`BOOT_CAUSE[1]` 전체 경로). 전에는 레지스터만 있고 타이머가 없었다 |
 | `gemm_core` / `gemm_top` — DMA + MAC 오케스트레이션 | **합성됨** | 429,672 / 430,404 cells |
-| Python 호스트 스택 (`tools/`) — HAL, 디스크립터 패커, 레지스터맵 SSOT, 트레이스 디코더, CLI | **동작** | `python3 -m pytest tests/ -q` → **336 passed, 8 xfailed** |
+| Python 호스트 스택 (`tools/`) — HAL, 디스크립터 패커, 레지스터맵 SSOT, 트레이스 디코더, CLI | **동작** | `python3 -m pytest tests/ -q` → **343 passed, 8 xfailed** |
 | PCIe (`pcie_ep_versal`, `g2_protob_top`) | **범위 밖** | Versal CPM 용이다. 타깃 보드가 KV260(Zynq MPSoC)이라 이 경로는 안 쓴다. 아래 "범위 밖" 참조 |
 | **AXI4 마스터 (외부 메모리)** — `axi4_master_adapter` | **시뮬레이션 검증** | `tb/tb_axi4_master_adapter.py` 8/8. 256 beat 상한·4KB 경계에서 버스트를 쪼갠다 (슬레이브 모델이 위반을 assert 한다). `dr1_soc_top` 에 결선됨. **실제 DDR 에 붙여 본 적 없다** |
 | 학습 경로 (`optimizer_unit`, `loss_scaler`, `collective_engine`, G3 top) | **행동 모델 (합성 불가)** | `rtl/behavioral/` 로 격리. 아래 참조 |
 | BF16 (`mxu_bf16_16x16`) | **미측정** | 손으로 만든 FP32 가산기 256개. yosys 가 시간 예산 안에 못 끝낸다 |
+| **긴 시퀀스 안정성** — Q1.15 상태가 실수 델타룰을 계속 따라가는가 | **유계 확인** | α 를 표현 가능한 최대값(0.999969, 사실상 망각 없음)으로 고정해도 400→3200토큰에서 드리프트가 **~11 LSB 로 평탄**하다 (풀스케일의 0.034%). `tests/test_golden_drift.py` 가 **기울기**를 지킨다. 표는 [docs/DESIGN.md](docs/DESIGN.md) 6.5절 |
 | 실물 보드 | **없음** | 보드를 산 적이 없다 |
 
 ### 범위 밖 — "스텁" 이 아니라 **안 쓰는 길**이다
@@ -107,7 +108,7 @@ sv2v → yosys 로 `rtl/` 전체를 3단 검사한다:
 
 ```bash
 python3 -m pytest tests/ -q
-# 336 passed, 8 xfailed
+# 343 passed, 8 xfailed
 ```
 
 xfail 8건: `fpga/vck190/create_cpm_ip.tcl` 에 CPM 설정이 없어서 5건,
@@ -138,7 +139,7 @@ bash scripts/run_dr1_tb.sh; echo $?     # 0 이어야 한다
 ### 뮤테이션 테스트 (불변 코드)
 
 ```bash
-python3 scripts/mutation_test.py        # 17/17 killed 여야 한다
+python3 scripts/mutation_test.py        # 18/18 killed 여야 한다
 ```
 
 소스를 한 군데씩 고의로 망가뜨리고 그 오라클 테스트가 **반드시 실패하는지** 본다.
