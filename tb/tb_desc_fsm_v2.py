@@ -54,6 +54,8 @@ async def reset_dut(dut):
     dut.queue_class.value = 0
     dut.cmd_ready.value = 0
     dut.core_done.value = 0
+    dut.core_err.value = 0            # W6 추가 포트 (엔진 실패). 여기서는 항상 0
+    dut.core_fault_code.value = 0
     dut.timeout_cycles.value = 100_000
     for i in range(DESC_SIZE):
         dut.desc_bytes[i].value = 0
@@ -100,6 +102,8 @@ async def test_valid_gemm_descriptor(dut):
     dut.core_done.value = 1
     await RisingEdge(dut.clk)
     dut.core_done.value = 0
+    dut.core_err.value = 0            # W6 추가 포트 (엔진 실패). 여기서는 항상 0
+    dut.core_fault_code.value = 0
 
     # Wait for done_pulse
     for _ in range(10):

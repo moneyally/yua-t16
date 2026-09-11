@@ -8,6 +8,7 @@
 //   0x0_3xxx  Queue Status (RO) + Q_OVERFLOW (W1C)
 //   0x1_0xxx  DMA Engine shim (Proto-A: derived from gemm state)
 //   0x2_0xxx  OOM Guard
+//   0x3_0xxx  DR1 (델타룰 헤드) — spec/deltarule.md 5절
 //   0x4_0xxx  TC0 Control/Status
 //   0x5_0xxx  TC1 (read-as-zero, HAS_TC1=0)
 //   0x6_0xxx  VPU/MXU Perf
@@ -51,6 +52,14 @@ module reg_top #(
   input  logic [31:0]  oom_usage_lo,
   input  logic [31:0]  oom_reserved_lo,
   input  logic [31:0]  oom_effective_lo,
+
+  // ── DR1 (spec/deltarule.md 5절) ──
+  input  logic [31:0]  dr1_status,
+  input  logic [31:0]  dr1_sat_count,
+  input  logic [31:0]  dr1_clamp_count,
+  input  logic [31:0]  dr1_cycles,
+  output logic         dr1_sat_clr,      // W1C 스트로브
+  output logic         dr1_clamp_clr,
 
   // ── TC0 status (from g2_ctrl_top) ──
   input  logic [31:0]  tc0_runstate,
@@ -132,6 +141,12 @@ module reg_top #(
   localparam logic [19:0] A_OOM_RESV_LO  = 20'h2_0008;
   localparam logic [19:0] A_OOM_EFF_LO   = 20'h2_0010;
   localparam logic [19:0] A_OOM_STATE    = 20'h2_001C;
+
+  // DR1 0x3_0000 (0x8033_0000 - 0x8030_0000 = 0x30000) — spec/deltarule.md 5절
+  localparam logic [19:0] A_DR1_STATUS = 20'h3_0000;
+  localparam logic [19:0] A_DR1_SAT    = 20'h3_0004;
+  localparam logic [19:0] A_DR1_CLAMP  = 20'h3_0008;
+  localparam logic [19:0] A_DR1_CYCLES = 20'h3_000C;
 
   // TC0 0x4_0000 (0x8034_0000 - 0x8030_0000 = 0x40000)
   localparam logic [19:0] A_TC0_RUNSTATE = 20'h4_0000;
@@ -263,6 +278,7 @@ module reg_top #(
   always_comb begin
     sw_reset_pulse = 1'b0; sw_cause_clr = 1'b0;
     doorbell_pulse = '0; overflow_clr = '0;
+    dr1_sat_clr = 1'b0; dr1_clamp_clr = 1'b0;
     irq_pending_w1c_en = 1'b0; irq_pending_w1c_data = 32'd0;
     irq_mask_wr_en = 1'b0; irq_mask_wr_data = 32'd0;
     irq_force_wr_en = 1'b0; irq_force_wr_data = 32'd0;
@@ -276,6 +292,10 @@ module reg_top #(
         A_Q0_DOORBELL + 8: doorbell_pulse[2] = 1'b1;
         A_Q0_DOORBELL + 12: doorbell_pulse[3] = 1'b1;
         A_Q_OVERFLOW:  overflow_clr = wr_data[NUM_QUEUES-1:0];
+        // DR1 카운터는 W1C 다. 0 을 쓰면 아무것도 지우지 않는다 (기존 W1C 규약과 같다).
+        // 카운터를 되돌리려면 읽은 값을 그대로 다시 쓴다 — spec/deltarule.md 5절.
+        A_DR1_SAT:     dr1_sat_clr   = |wr_data;
+        A_DR1_CLAMP:   dr1_clamp_clr = |wr_data;
         A_IRQ_PENDING: begin irq_pending_w1c_en = 1'b1; irq_pending_w1c_data = wr_data; end
         A_IRQ_MASK:    begin irq_mask_wr_en = 1'b1; irq_mask_wr_data = wr_data; end
         A_IRQ_FORCE:   begin irq_force_wr_en = 1'b1; irq_force_wr_data = wr_data; end
@@ -327,6 +347,12 @@ module reg_top #(
         A_OOM_RESV_LO:  rd_data = oom_reserved_lo;
         A_OOM_EFF_LO:   rd_data = oom_effective_lo;
         A_OOM_STATE:     rd_data = {22'd0, oom_prefetch_clamp, oom_admission_stop, 6'd0, oom_state};
+
+        // DR1
+        A_DR1_STATUS:  rd_data = dr1_status;
+        A_DR1_SAT:     rd_data = dr1_sat_count;
+        A_DR1_CLAMP:   rd_data = dr1_clamp_count;
+        A_DR1_CYCLES:  rd_data = dr1_cycles;
 
         // TC0
         A_TC0_RUNSTATE: rd_data = tc0_runstate;

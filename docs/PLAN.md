@@ -4,7 +4,7 @@
 투입 전제: 평일 저녁 4시간 중 RTL 1~2시간(주말은 칩 5~6시간), 낮에는 에이전트가 자율 진행.
 예산: 1년 하드웨어 상한 100만원. 비상금 800만원은 건드리지 않는다.
 
-## 현재 주차: 5
+## 현재 주차: 6
 
 ---
 
@@ -41,8 +41,8 @@
 
 ## 2단계 · 5~8주 · RTL (d=16 먼저)
 
-- [ ] W5 `rtl/dr1/state_sram.sv`(16×16 Q1.15, 1R1W), `rtl/dr1/vec_regs.sv`, `rtl/dr1/matvec_unit.sv`. 각각 단위 cocotb + yosys 게이트.
-- [ ] W6 `rtl/dr1/dr1_top.sv` FSM: INIT / LOAD_QKV / MATVEC_K / ERR / UPDATE(mac_array 재사용) / MATVEC_Q / WRITE_O / DONE. 첫 목표: `DELTA_INIT` + `DELTA_DUMP`만으로 I1 통과.
+- [x] W5 `rtl/dr1/state_sram.sv`(16×16 Q1.15, 1R1W), `rtl/dr1/vec_regs.sv`, `rtl/dr1/matvec_unit.sv`. 각각 단위 cocotb + yosys 게이트. **(+`requant_q15.sv`. 전부 골든 비트 일치, 게이트 EXIT=0)**
+- [x] W6 `rtl/dr1/update_unit.sv`(골든 `update_row` 비트 일치) + `rtl/dr1/dr1_top.sv` FSM **골격**: IDLE/INIT/DUMP/DONE_OK/DONE_ERR 만 살아 있고 `DELTA_STEP` 은 `fault_code 0x07 DR1_UNIMPL`. `desc_fsm_v2`·`reg_top` 배선, **I1 을 실 RTL 로 통과**, RTL 경로 오류 주입, BUG-001 회귀를 DR1 fault 로 확장. LOAD_QKV/MATVEC/ERR/WRITE_O 는 **W7**.
 - [ ] W7 `DELTA_STEP` 전체 경로. 골든 대비 **1토큰 비트 일치** → 10토큰 → 100토큰. 불일치 시 첫 불일치 지점 출력이 동작하는지 먼저 확인.
 - [ ] W8 1,000토큰 무작위 시드 3개 비트 일치. 트레이스 링 `SAT_EVENT` 연동(I4). Verilator 린트 경고 0. **여기서 d=16 완료 선언.** d=64 확장은 W8 완료 후에만, 남는 시간에.
 

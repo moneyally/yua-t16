@@ -4,6 +4,12 @@
 
 ## 2026-09-11 (세션 10, 자율모드) — 참고문헌 출처 · 기준선 사실 보강 · W6
 
+- **한 것**: [0] 참고문헌 출처를 아래에 기록(SANE 은 전용 검색을 한 적이 없었다는 것까지) · [1] 기준선 2603.05931 사실 보강 — **토큰당 읽기 1 + 쓰기 1**, 5단계 파이프라인, GVA, FP32는 [추정] (DESIGN 0.8, PRIOR_ART 0.2) · [2] **W6**: `update_unit.sv`(골든 `update_row` 와 300세트 비트 일치, 행당 **4사이클**), `dr1_top.sv` FSM 골격(INIT/DUMP 만, STEP→`0x07 DR1_UNIMPL`), `mac_pe` 폭 파라미터화 재사용(DESIGN 8.1), `desc_fsm_v2` 에 **`core_err` 포트 신설** + opcode 0x50/0x52, `reg_top` DR1 레지스터 4개, `CocotbDut.init/dump` 구현, **하네스 I1 을 실 RTL 로 통과**, RTL 경로 오류 주입, BUG-001 회귀를 DR1 fault 로 확장 · [3] VCK190 문서 3건 xfail · [4] `docs/RESEARCH.md` 신설(계획만).
+- **안 된 것**: `DELTA_STEP` 계산 경로는 **W7** (이번 주 금지 항목이라 손대지 않음). **사이클 예산 문제를 발견했다** — STEP 추정 ≈104 사이클 vs 계약 상한 4·d=64 (DESIGN 6.1 에 적었다. 상한을 고쳐 쓰지 않았다). DUMP 는 아직 **스트림 포트**일 뿐 메모리에 안 쓴다. 덤프 **내용**은 0 상태만 검증했다(쓰기 경로가 W7이라 비영 상태를 만들 수단이 없다). STAGE 1 에서 `backward_engine` elaborate 가 처음으로 시간 초과(>120s) — 설계가 커져서지 회귀는 아니다. arxiv 본문은 여전히 못 읽음.
+- **검증 명령**: `bash scripts/synth_gate.sh --check-mem state_sram` → **EXIT=0** (STAGE1 35/38, STAGE2 34/38) · **`mac_pe` 730 / `mac_array` 196,352 — 파라미터화 전후 셀 수 동일** · `dr1_top` 8,808, `update_unit` 42,198 · `bash scripts/run_dr1_tb.sh` → **8/8 ok (37 테스트)** · g2_ctrl_top 기존 tb 11개 → **35/35 PASS** · `python3 -m pytest tests/ -q` → **308 passed, 8 xfailed** (실패 0) · verilator 경고 수 HEAD 와 동일(신규 0).
+- **다음 세션 첫 작업**: W7 — `dr1_top` 에 `LOAD_QKV`/`MATVEC_K`/`ERR`/`UPDATE`/`MATVEC_Q`/`WRITE_O` 를 붙여 `DELTA_STEP` 완성. 1토큰 비트 일치 → 10 → 100. 동시에 **행 파이프라인으로 사이클을 64에 맞출 수 있는지 실측**. `desc_fsm_v2` 유효 opcode 에 0x51 추가는 그 다음.
+- **결정 필요**: (1) `docs/RESEARCH.md` 4절 — **Q-C(세션 상주)와 Q-D(헤드 상태 압축)는 닫자**는 제안. 검색에서 UNISON 2609.09643(하드웨어 co-design!), 2602.04852 등이 이미 답하고 있다. (2) 남은 Q-E/Q-F 중 **Q-F(하드클립 vs tanh, SAT_EVENT 트리거)를 1주 실험으로** 제안 — 실행은 승인 후. (3) STEP 사이클 예산 104 vs 64 — 파이프라인으로 줄일지, 상한을 다시 정할지. (4) 하네스에 `run_harness_async` 를 추가했다. "CocotbDut 한 클래스만 채운다"는 W4-2 주장은 **반만 맞았다** — 비교 로직은 한 곳(`_harness_core`)으로 유지했지만 **await 때문에 호출 껍데기 하나가 더 필요했다.** 정직하게 적는다.
+
 ### 참고문헌 출처 (규칙 7 — 어디서 얻었는가)
 
 **2608.15533 DeltaLog** — 두 경로로 얻었다.

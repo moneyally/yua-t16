@@ -110,6 +110,10 @@ module g2_ctrl_top #(
   logic [31:0] mxu_tile_count_val, desc_done_count_val;
   logic perf_freeze;
 
+  // ── DR1 (델타룰 헤드) 전방 선언 ──
+  logic [31:0] dr1_status, dr1_sat_count, dr1_clamp_count, dr1_cycles;
+  logic        dr1_sat_clr, dr1_clamp_clr;
+
   // ===============================================================
   // Register Bank
   // ===============================================================
@@ -127,6 +131,9 @@ module g2_ctrl_top #(
     .oom_prefetch_clamp(oom_prefetch_clamp),
     .oom_usage_lo(oom_allocated[31:0]), .oom_reserved_lo(oom_reserved[31:0]),
     .oom_effective_lo(oom_effective[31:0]),
+    .dr1_status(dr1_status), .dr1_sat_count(dr1_sat_count),
+    .dr1_clamp_count(dr1_clamp_count), .dr1_cycles(dr1_cycles),
+    .dr1_sat_clr(dr1_sat_clr), .dr1_clamp_clr(dr1_clamp_clr),
     .tc0_runstate(tc0_runstate_val), .tc0_fault_status(tc0_fault_status_val),
     .tc0_perf_cycles(tc0_perf_cycles_val), .tc0_desc_ptr(tc0_desc_ptr_val),
     .tc0_enable(tc0_enable), .tc0_halt(tc0_halt), .tc0_fault_clr(tc0_fault_clr),
@@ -244,7 +251,10 @@ module g2_ctrl_top #(
     .cmd_opcode(fsm_cmd_opcode),
     .act_addr(fsm_act_addr), .wgt_addr(fsm_wgt_addr), .out_addr(fsm_out_addr),
     .Kt(fsm_Kt),
-    .core_done(gemm_done_pulse),
+    // 엔진 완료/실패를 모은다. DR1 의 done_err 가 core_err 로 올라가야
+    // fault 난 디스크립터가 DESC_DONE IRQ 를 올리지 않는다 (BUG-001).
+    .core_done(gemm_done_pulse | dr1_done_ok),
+    .core_err(dr1_done_err), .core_fault_code(dr1_fault_code),
     .timeout_cycles(32'd100_000),
     .fault_valid(fsm_fault_valid), .fault_code(fsm_fault_code),
     .busy(fsm_busy), .done_pulse(fsm_done_pulse),
@@ -256,10 +266,26 @@ module g2_ctrl_top #(
   // ===============================================================
   logic gemm_desc_valid, gemm_desc_ready;
   logic gemm_busy, gemm_done_pulse;
+
+  // DR1 명령/완료
+  localparam int DR1_D = 16;                 // docs/DESIGN.md 4절: v1 은 d=16 부터
+  logic dr1_cmd_valid, dr1_cmd_ready;
+  logic dr1_busy, dr1_done_ok, dr1_done_err, dr1_done_pulse;
+  logic [7:0] dr1_fault_code;
+  logic dr1_dump_valid;
+  logic [$clog2(DR1_D)-1:0] dr1_dump_row;
+  logic [DR1_D*16-1:0]      dr1_dump_data;
   logic [31:0] gemm_perf_cycles, gemm_perf_bytes;
 
   assign gemm_desc_valid = fsm_cmd_valid && (fsm_cmd_opcode == 8'h02);
-  assign fsm_cmd_ready   = gemm_desc_ready;
+
+  // DR1 (spec/deltarule.md 2절): 0x50 INIT, 0x52 DUMP.
+  // 0x51 STEP 은 desc_fsm_v2 의 유효 opcode 가 아니라 여기까지 오지 않는다 (W7).
+  wire fsm_opcode_is_dr1 = (fsm_cmd_opcode == 8'h50) || (fsm_cmd_opcode == 8'h52);
+  assign dr1_cmd_valid   = fsm_cmd_valid && fsm_opcode_is_dr1;
+
+  // cmd_ready 는 목적지에 따라 갈라진다. DR1 이 아닌 opcode 의 동작은 예전과 같다.
+  assign fsm_cmd_ready   = fsm_opcode_is_dr1 ? dr1_cmd_ready : gemm_desc_ready;
 
   gemm_top #(.MAX_KT(MAX_KT)) u_gemm (
     .clk(clk), .rst_n(rst_n),
@@ -275,6 +301,35 @@ module g2_ctrl_top #(
     .busy(gemm_busy), .done_pulse(gemm_done_pulse),
     .perf_cycles(gemm_perf_cycles), .perf_bytes(gemm_perf_bytes)
   );
+
+  // ===============================================================
+  // ORBIT-DR1 헤드 (PLAN W6 — INIT/DUMP 골격)
+  // ===============================================================
+  // slot 은 디스크립터 바이트 1, dst_addr 는 기존 out_addr 자리(바이트 32)다
+  // — spec/deltarule.md 3.1/3.4절. desc_fsm_v2 의 필드 추출은 손대지 않았다.
+  //
+  // dump 스트림은 아직 어디에도 안 붙는다. 스크래치 쓰기 경로는 W7~W8 이고,
+  // 지금 붙이는 척하면 "썼다" 는 거짓말이 된다. 포트는 열어 두고 비워 둔다.
+  dr1_top #(.D(DR1_D), .W(16), .NUM_SLOTS(1)) u_dr1 (
+    .clk(clk), .rst_n(rst_n),
+    .cmd_valid(dr1_cmd_valid), .cmd_ready(dr1_cmd_ready),
+    .cmd_opcode(fsm_cmd_opcode),
+    .cmd_slot(desc_hold[1]),
+    .cmd_dst_addr(fsm_out_addr),
+    .dump_valid(dr1_dump_valid), .dump_row(dr1_dump_row), .dump_data(dr1_dump_data),
+    .busy(dr1_busy),
+    .done_ok(dr1_done_ok), .done_err(dr1_done_err), .done_pulse(dr1_done_pulse),
+    .fault_code(dr1_fault_code),
+    .dr1_status(dr1_status), .dr1_sat_count(dr1_sat_count),
+    .dr1_clamp_count(dr1_clamp_count), .dr1_cycles(dr1_cycles),
+    .sat_count_clr(dr1_sat_clr), .clamp_count_clr(dr1_clamp_clr)
+  );
+
+  // 아직 쓰지 않는 DR1 출력들. 이 파일은 맨 위에서 UNUSEDSIGNAL 을 끄고 있으므로
+  // 여기서 lint_on 을 쓰면 **파일 전체의 면제가 풀린다** — 그래서 프라그마 없이
+  // 의도만 남긴다. W7 에서 dump 스트림이 스크래치 쓰기 경로로 간다.
+  wire _unused_dr1 = &{1'b0, dr1_dump_valid, dr1_dump_row, dr1_dump_data,
+                       dr1_busy, dr1_done_pulse, 1'b0};
 
   // ===============================================================
   // TC0 RUNSTATE / FAULT_STATUS (REG_SPEC section 7)

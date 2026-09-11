@@ -47,6 +47,12 @@
 | **0x51** | **`DELTA_STEP`** | 토큰 1개 처리 |
 | **0x52** | **`DELTA_DUMP`** | 상태 전체를 스크래치로 (검증용) |
 
+**구현 상태 (W6)**: `DELTA_INIT`/`DELTA_DUMP` 는 `dr1_top` 에서 동작하고
+`desc_fsm_v2` 의 유효 opcode 목록에도 들어갔다. **`DELTA_STEP` 은 아직 없다** —
+`dr1_top` 은 `fault_code 0x07 (DR1_UNIMPL)` 로 실패하고, `desc_fsm_v2` 는
+아직 0x51 을 유효 opcode 로 받지 않는다 (`0x01 ILLEGAL_OPCODE`).
+
+
 ---
 
 ## 3. 디스크립터 레이아웃 (64바이트)
@@ -113,6 +119,12 @@
 
 덤프 크기는 `d × d × 2` 바이트. v1 `d=16` → 512바이트.
 
+**W6 현재 상태**: `rtl/dr1/dr1_top.sv` 는 덤프를 **스트림 포트**로 내보낸다
+(`dump_valid` / `dump_row` / `dump_data`, 행마다 1펄스, 행 우선).
+`dst_addr` 는 **정렬 검사에만** 쓰이고 아직 메모리에 쓰지 않는다 —
+스크래치 쓰기 경로 연결은 W7~W8 이다. "메모리에 썼다" 고 말하지 않는다.
+
+
 ### 3.5 벡터·상태 평탄화 규칙
 
 RTL 의 `q_flat` / `k_flat` / `v_flat` / `state_sram.rd_data` 는 모두 이 규칙을 따른다:
@@ -156,6 +168,7 @@ RTL 테스트벤치와 `CocotbDut` 이 **이 함수만** 쓴다. 규칙이 두 �
 | 0x04 | `RESERVED` | (기존) |
 | **0x05** | **`DR1_BAD_SLOT`** | `slot >= DR1_NUM_SLOTS`. v1 은 `slot != 0` 이면 전부 |
 | **0x06** | **`DR1_UNALIGNED`** | `q/k/v/o/dst` 주소가 **16바이트 정렬**이 아님 |
+| **0x07** | **`DR1_UNIMPL`** | 이 빌드에 없는 DR1 경로. **v1 W6 에서는 `DELTA_STEP`** (계산 경로가 W7 이다). 조용히 성공하지 않는다 |
 
 16바이트 정렬인 이유: 스크래치 SRAM 의 데이터 폭이 128비트다
 (`rtl/act_sram.sv` 의 `wdata [127:0]`). 정렬되지 않은 주소는 한 번의 접근으로 읽을 수 없다.

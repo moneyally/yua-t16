@@ -87,6 +87,8 @@ async def reset_dut(dut):
     dut.queue_class.value = 0
     dut.cmd_ready.value = 1
     dut.core_done.value = 0
+    dut.core_err.value = 0            # W6 추가 포트 (엔진 실패). 여기서는 항상 0
+    dut.core_fault_code.value = 0
     dut.timeout_cycles.value = 200
     set_desc_bytes(dut, [0] * DESC_SIZE)
     await Timer(50, unit="ns")
@@ -125,6 +127,8 @@ async def observe(dut, cycles, feed_core_done=False):
             dut.core_done.value = 1
             await RisingEdge(dut.clk)
             dut.core_done.value = 0
+            dut.core_err.value = 0            # W6 추가 포트 (엔진 실패). 여기서는 항상 0
+            dut.core_fault_code.value = 0
             fed = True
             for t in (trace_done, trace_fault, trace_ok, trace_err):
                 t.extend([0, 0])

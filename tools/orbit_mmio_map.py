@@ -286,6 +286,7 @@ class FaultCode(IntEnum):
     RESERVED       = 0x04
     DR1_BAD_SLOT   = 0x05
     DR1_UNALIGNED  = 0x06
+    DR1_UNIMPL     = 0x07
 
 # ═══════════════════════════════════════════════════════════════════
 # Trace entry format (RTL-derived from g2_ctrl_top.sv)

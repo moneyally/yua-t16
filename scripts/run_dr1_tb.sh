@@ -10,6 +10,8 @@
 #   rtl/dr1/update_unit.sv   ↔  sim/golden/deltarule.py  update_row()     (W6)
 #   rtl/dr1/state_sram.sv    ↔  상태 배열 S + tools/orbit_pack.py 평탄화 규칙
 #   rtl/dr1/vec_regs.sv      ↔  q/k/v 인자 + tools/orbit_pack.py
+#   rtl/dr1/dr1_top.sv       ↔  spec/deltarule.md 2·4절 (INIT/DUMP 만, W6)
+#                               + tb/tb_dr1_top.py 하네스의 불변조건 I1
 #
 # 사용:  bash scripts/run_dr1_tb.sh ; echo $?     # 0 이어야 한다
 # =============================================================================
@@ -48,6 +50,12 @@ run_one requant_q15    tb_requant_q15   "$DR1/requant_q15.sv"
 run_one state_sram     tb_state_sram    "$DR1/state_sram.sv"
 run_one vec_regs       tb_vec_regs      "$DR1/vec_regs.sv"
 run_one matvec_tb_wrap tb_matvec_unit   "$DR1/matvec_tb_wrap.sv" "$DR1/matvec_unit.sv" "$DR1/state_sram.sv" "$DR1/requant_q15.sv"
+run_one update_unit    tb_update_unit   "$DR1/update_unit.sv" "$DR1/requant_q15.sv" rtl/mac_pe.sv
+run_one dr1_top        tb_dr1_top_fsm   "$DR1/dr1_top.sv" "$DR1/state_sram.sv"
+# 하네스(tb/tb_dr1_top.py)를 실 RTL 에 붙인 것 — 불변조건 I1 + RTL 경로 오류 주입 (W6)
+run_one dr1_top        tb_dr1_harness_rtl "$DR1/dr1_top.sv" "$DR1/state_sram.sv"
+# 디스크립터·IRQ 경로에서의 DR1 fault (BUG-001 회귀 확장)
+run_one g2_ctrl_top    tb_g2_ctrl_top_dr1_fault $(ls rtl/*.sv rtl/dr1/*.sv)
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then

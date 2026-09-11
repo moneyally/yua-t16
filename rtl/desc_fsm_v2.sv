@@ -49,6 +49,12 @@ module desc_fsm_v2 #(
 
   // Completion feedback
   input  logic        core_done,
+  // 엔진 쪽 실패 (docs/DESIGN.md 5.1, spec/deltarule.md 4절).
+  // core_done 과 달리 **실패**를 보고한다. 예전에는 이 입력이 없어서 엔진이
+  // 실패해도 desc_fsm 은 ST_DONE 으로 가 done_ok 를 냈다 — BUG-001 과 같은 종류다.
+  // 안 쓰는 상위 모듈은 1'b0 으로 묶으면 동작이 예전과 완전히 같다.
+  input  logic        core_err,
+  input  logic [7:0]  core_fault_code,
 
   // Timeout configuration (from register interface)
   input  logic [31:0] timeout_cycles,
@@ -163,8 +169,12 @@ module desc_fsm_v2 #(
   // ---------------------------------------------------------------
   // Opcode validation
   // ---------------------------------------------------------------
+  // 0x50 DELTA_INIT / 0x52 DELTA_DUMP 는 dr1_top 이 처리한다 (spec/deltarule.md 2절).
+  // **0x51 DELTA_STEP 은 일부러 빠져 있다** — 계산 경로가 W7 이라 지금 받으면
+  // 조용히 아무것도 안 하게 된다. 여기서 ILLEGAL_OPCODE 로 막는 편이 낫다.
   function automatic logic opcode_valid(input logic [7:0] op);
-    opcode_valid = (op == 8'h01) || (op == 8'h02) || (op == 8'h03) || (op == 8'h04);
+    opcode_valid = (op == 8'h01) || (op == 8'h02) || (op == 8'h03) || (op == 8'h04)
+                || (op == 8'h50) || (op == 8'h52);
   endfunction
 
   // ---------------------------------------------------------------
@@ -187,15 +197,25 @@ module desc_fsm_v2 #(
   // core_done capture (same pattern as ctrl_fsm)
   // ---------------------------------------------------------------
   logic core_done_seen;
+  logic core_err_seen;
+  logic [7:0] core_fault_r;
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       core_done_seen <= 1'b0;
+      core_err_seen  <= 1'b0;
+      core_fault_r   <= 8'h00;
     end else begin
-      if (state == ST_IDLE || state == ST_DISPATCH)
+      if (state == ST_IDLE || state == ST_DISPATCH) begin
         core_done_seen <= 1'b0;
-      else if (core_done == 1'b1)
-        core_done_seen <= 1'b1;
+        core_err_seen  <= 1'b0;
+      end else begin
+        if (core_done == 1'b1) core_done_seen <= 1'b1;
+        if (core_err  == 1'b1) begin
+          core_err_seen <= 1'b1;
+          core_fault_r  <= core_fault_code;
+        end
+      end
     end
   end
 
@@ -346,7 +366,10 @@ module desc_fsm_v2 #(
 
       ST_WAIT: begin
         busy = 1'b1;
-        if (timeout_expired)
+        // 순서가 중요하다: 엔진 실패가 완료보다 먼저 검사돼야 한다.
+        // 엔진이 done_err 를 내면서 done_pulse 도 같이 내는 경우(리타이어 규약)
+        // core_done 과 core_err 이 같은 사이클에 올 수 있다 — 그때 실패가 이긴다.
+        if (timeout_expired || core_err_seen)
           state_n = ST_FAULT;
         else if (core_done_seen)
           state_n = ST_DONE;
@@ -380,7 +403,9 @@ module desc_fsm_v2 #(
         else if (state == ST_DECODE)
           fault_code_r <= 8'h01;  // illegal opcode
         else if (state == ST_WAIT)
-          fault_code_r <= 8'h03;  // timeout
+          // 엔진이 낸 코드를 그대로 올린다 (DR1 은 0x05/0x06/0x07).
+          // 엔진 실패가 아니면 타임아웃이다.
+          fault_code_r <= core_err_seen ? core_fault_r : 8'h03;
         else
           fault_code_r <= 8'h04;  // reserved
       end

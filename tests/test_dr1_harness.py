@@ -33,7 +33,7 @@ from tb.tb_dr1_top import (  # noqa: E402
     make_token_sequence,
     run_harness,
 )
-from tools.orbit_mmio_map import DR1_NUM_SLOTS, FaultCode, UQ15_ONE  # noqa: E402
+from tools.orbit_mmio_map import DR1_ADDR_ALIGN, DR1_NUM_SLOTS, FaultCode, UQ15_ONE  # noqa: E402
 
 SEEDS = [1, 2, 3]
 
@@ -264,13 +264,35 @@ def test_alpha_beta_above_one_is_clamped_not_faulted():
 # ═══════════════════════════════════════════════════════════════════════════
 # CocotbDut 자리
 # ═══════════════════════════════════════════════════════════════════════════
-def test_cocotb_dut_is_a_stub_with_guidance():
-    """기대값 출처: PLAN W4-2 — CocotbDut 은 아직 자리만 있고, 채울 방법이 적혀 있어야 한다."""
-    with pytest.raises(NotImplementedError, match="RTL"):
-        CocotbDut()
+def test_cocotb_dut_init_dump_implemented_step_is_w7():
+    """기대값 출처: PLAN W6 — CocotbDut 의 init/dump 는 구현됐고 step 은 W7 이다.
+
+    **이 테스트는 W4-2 의 "CocotbDut 은 아직 자리만 있다" 를 대체한다.**
+    전제가 바뀌었다 (RTL 이 생겼다). 기대값을 바꿔서 통과시킨 것이 아니라,
+    검사 대상이 바뀐 것이다 — 옛 버전은 `CocotbDut()` 이 NotImplementedError 를
+    내는지 봤고, 지금은 그 반대를 본다.
+    """
+    import asyncio
+    import inspect
+
+    # 생성자는 cocotb 없이도 만들어져야 한다 (핸들만 들고 있는다)
+    dut = CocotbDut(dut=None, d=16)
+    assert dut.d == 16
+
+    for name in ("init", "step", "dump"):
+        assert inspect.iscoroutinefunction(getattr(CocotbDut, name)), (
+            f"{name} 은 코루틴이어야 한다 — RTL 을 몰려면 await 이 필요하다"
+        )
+
+    # step 은 W7 이다. 조용히 0 을 돌려주지 않고 확실히 터져야 한다.
+    with pytest.raises(NotImplementedError, match="W7"):
+        asyncio.run(dut.step(0, None, None, None, 0, 0))
+
+    # 주소 정렬 계약 (spec/deltarule.md 4절)
+    assert CocotbDut.DUMP_ADDR % DR1_ADDR_ALIGN == 0
 
     doc = CocotbDut.__doc__
-    for piece in ("falling edge", "done_ok", "16바이트", "pack_delta_step", "BUG-008", "BUG-001"):
+    for piece in ("falling edge", "done_ok", "done_pulse", "BUG-008", "BUG-001", "W7"):
         assert piece in doc, f"CocotbDut docstring 에 {piece!r} 안내가 없다"
 
 
