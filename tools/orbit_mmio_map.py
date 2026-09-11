@@ -24,6 +24,7 @@ class Block(IntEnum):
     Q_STATUS = 0x8030_3000
     DMA      = 0x8031_0000
     OOM      = 0x8032_0000
+    DR1      = 0x8033_0000  # ORBIT-DR1 델타룰 헤드 (spec/deltarule.md)
     TC0      = 0x8034_0000
     TC1      = 0x8035_0000
     PERF     = 0x8036_0000
@@ -103,6 +104,16 @@ OOM_USAGE_LO = Reg("OOM_USAGE_LO", 0x8032_0000, Access.RO, desc="allocated bytes
 OOM_RESV_LO  = Reg("OOM_RESV_LO",  0x8032_0008, Access.RO, desc="reserved bytes low")
 OOM_EFF_LO   = Reg("OOM_EFF_LO",   0x8032_0010, Access.RO, desc="effective usage low")
 OOM_STATE    = Reg("OOM_STATE",     0x8032_001C, Access.RO, desc="pressure state")
+
+# ── DR1 (ORBIT-DR1 델타룰 헤드) — SSOT: spec/deltarule.md 5절 ──────
+DR1_STATUS      = Reg("DR1_STATUS",      0x8033_0000, Access.RO,  0, "[0] busy, [11:4] last_slot")
+DR1_SAT_COUNT   = Reg("DR1_SAT_COUNT",   0x8033_0004, Access.W1C, 0, "포화 누적 횟수")
+DR1_CLAMP_COUNT = Reg("DR1_CLAMP_COUNT", 0x8033_0008, Access.W1C, 0, "alpha/beta 클램프 누적 횟수")
+DR1_CYCLES      = Reg("DR1_CYCLES",      0x8033_000C, Access.RO,  0, "마지막 DELTA_STEP 사이클 수")
+
+DR1_STATUS_BUSY      = 1 << 0
+DR1_STATUS_SLOT_SHIFT = 4
+DR1_STATUS_SLOT_MASK  = 0xFF << DR1_STATUS_SLOT_SHIFT
 
 # ── TC0 Control ──────────────────────────────────────────────────
 TC0_RUNSTATE  = Reg("TC0_RUNSTATE",  0x8034_0000, Access.RO,  desc="idle/fetch/run/stall/fault")
@@ -228,12 +239,53 @@ DESC_OUT_ADDR_OFF = 32
 DESC_KT_OFF       = 40  # u32 LE
 DESC_CRC_OFF      = 63  # CRC-8 over bytes [0:62]
 
+# ═══════════════════════════════════════════════════════════════════
+# ORBIT-DR1 디스크립터 필드 — SSOT: spec/deltarule.md 3절
+#
+# 기존 필드 위치를 그대로 재사용한다. rtl/desc_fsm_v2.sv 의 추출 로직을
+# 바꾸지 않기 위해서다:
+#     q_addr = act_addr(16), k_addr = wgt_addr(24), o_addr = out_addr(32)
+# 비어 있던 예약 영역만 새로 쓴다: v_addr(44), alpha(52), beta(54)
+# tests/test_dr1_spec_consistency.py 가 spec 문서 표와 아래 상수를 대조한다.
+# ═══════════════════════════════════════════════════════════════════
+DR1_SLOT_OFF   = 1    # u8
+DR1_Q_ADDR_OFF = 16   # u64 LE  (= DESC_ACT_ADDR_OFF)
+DR1_K_ADDR_OFF = 24   # u64 LE  (= DESC_WGT_ADDR_OFF)
+DR1_O_ADDR_OFF = 32   # u64 LE  (= DESC_OUT_ADDR_OFF)
+DR1_V_ADDR_OFF = 44   # u64 LE
+DR1_ALPHA_OFF  = 52   # u16 LE, UQ1.15
+DR1_BETA_OFF   = 54   # u16 LE, UQ1.15
+
+DR1_NUM_SLOTS   = 1       # v1. slot != 0 이면 DR1_BAD_SLOT
+DR1_ADDR_ALIGN  = 16      # 바이트. act_sram 데이터 폭 128비트
+UQ15_ONE        = 0x8000  # UQ1.15 에서 1.0 (정확)
+
 # Opcodes
 class Opcode(IntEnum):
     NOP    = 0x01
     GEMM   = 0x02
     KVC_OP = 0x03
     VPU_OP = 0x04
+    # G3 경로 (rtl/g3_desc_fsm.sv)
+    MXU_FWD    = 0x10
+    BACKWARD   = 0x20
+    OPTIMIZER  = 0x30
+    COLLECTIVE = 0x40
+    # ORBIT-DR1 (spec/deltarule.md 2절)
+    DELTA_INIT = 0x50
+    DELTA_STEP = 0x51
+    DELTA_DUMP = 0x52
+
+
+class FaultCode(IntEnum):
+    """desc_fsm_v2 fault_code. spec/deltarule.md 4절."""
+    NONE           = 0x00
+    ILLEGAL_OPCODE = 0x01
+    CRC_MISMATCH   = 0x02
+    TIMEOUT        = 0x03
+    RESERVED       = 0x04
+    DR1_BAD_SLOT   = 0x05
+    DR1_UNALIGNED  = 0x06
 
 # ═══════════════════════════════════════════════════════════════════
 # Trace entry format (RTL-derived from g2_ctrl_top.sv)
@@ -243,6 +295,8 @@ class TraceType(IntEnum):
     DESC_DONE     = 2
     DESC_FAULT    = 3
     Q_OVERFLOW    = 4
+    SAT_EVENT     = 5   # spec/deltarule.md 5.2
+    CLAMP_EVENT   = 6
 
 # Trace payload layout: {46'b0, qclass[1:0], opcode_or_fault[7:0], 8'b0}
 # Meta: {24'b0, type[3:0], 3'b0, fatal}

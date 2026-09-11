@@ -25,6 +25,7 @@ from sim.golden.deltarule import (  # noqa: E402
     ONE_Q15,
     Q15_MAX,
     Q15_MIN,
+    UQ15_ONE,
     float_to_q15,
     q15_from_acc,
     q15_to_float,
@@ -36,12 +37,12 @@ from sim.golden.deltarule import (  # noqa: E402
 
 DIMS = [16, 64]
 
-# α=1.0 은 부호 있는 Q1.15 로 **정확히 표현되지 않는다** (최대 32767 = 0.999969...).
-# 아래 테스트들은 "α≈1" 을 Q15_MAX 로 쓰고, 그 때문에 생기는 1 LSB 오차를 허용한다.
-# 정확한 1.0 이 필요한 경우는 ONE_Q15(=32768)를 쓴다 — 이건 16비트 필드를 넘으므로
-# W4-1 (spec/deltarule.md) 에서 α/β 필드 폭을 정할 때 결론을 내야 한다. docs/LOG.md 참조.
-ALPHA_ONE_Q15 = Q15_MAX      # 표현 가능한 최대값 ≈ 1.0
-ALPHA_ONE_EXACT = ONE_Q15    # 정확한 1.0 (16비트 초과)
+# α, β 는 **부호 없는 UQ1.15** 다 (spec/deltarule.md 1절, DESIGN.md 3절).
+# 0x8000 = 1.0 이 **정확히** 표현된다 — 16비트 그대로, 특별 해석 없음.
+# 반면 k, q, v, S 는 부호 있는 Q1.15 라 1.0 이 없다 (최대 32767 = 0.999969...).
+# 그래서 아래에서 "α=1" 은 정확하고, "k=1" 은 근사(Q15_MAX)다.
+ALPHA_ONE = UQ15_ONE         # 0x8000 = 1.0 (UQ1.15, 정확)
+KQ_ONE_APPROX = Q15_MAX      # 부호 있는 Q1.15 로 낼 수 있는 1.0 의 최선 (≈0.99997)
 
 
 def rng(seed=20260911):
@@ -68,7 +69,7 @@ def test_i1_init_state_is_all_zero(d):
     q = random_vec(r, d)
     beta = float_to_q15(0.5)
 
-    S1, o1, sat = step(S0, q, k, v, ALPHA_ONE_EXACT, beta)
+    S1, o1, sat = step(S0, q, k, v, ALPHA_ONE, beta)
     assert sat == 0, f"이 입력에서는 포화가 없어야 한다 (관측 {sat})"
 
     # S=0 이면 p=0, err=v 이므로 S_1 = q15(β·v[i] · k[j]) 여야 한다.
@@ -90,22 +91,21 @@ def test_i1_init_state_is_all_zero(d):
 def test_i2_alpha1_beta0_keeps_state(d):
     """기대값 출처: DESIGN.md 7절 I2 — α=1, β=0 이면 상태는 변하지 않는다.
 
-    α=1.0 이 Q1.15 로 정확히 표현되지 않으므로 두 가지를 확인한다:
-      - ALPHA_ONE_EXACT(정확한 1.0): 상태가 **완전히 동일**해야 한다.
-      - Q15_MAX(≈1.0):               1 LSB 이내여야 한다.
+    α 는 UQ1.15 라 1.0 이 정확하다. 그래서 상태는 **완전히 동일**해야 한다.
+    비교를 위해 부호 있는 Q1.15 의 근사값(Q15_MAX)도 같이 확인한다 — 그건 1 LSB 이내.
     """
     r = rng()
     S = random_state(r, d)
     q, k, v = random_vec(r, d), random_vec(r, d), random_vec(r, d)
 
-    S_exact, _, sat_e = step(S, q, k, v, ALPHA_ONE_EXACT, 0)
+    S_exact, _, sat_e = step(S, q, k, v, ALPHA_ONE, 0)
     assert sat_e == 0
     assert np.array_equal(S_exact, S), (
-        "I2: α=1(정확), β=0 인데 상태가 변했다. "
+        "I2: α=1.0(UQ1.15, 정확), β=0 인데 상태가 변했다. "
         f"최대 차이 {int(np.max(np.abs(S_exact - S)))} LSB"
     )
 
-    S_approx, _, _ = step(S, q, k, v, ALPHA_ONE_Q15, 0)
+    S_approx, _, _ = step(S, q, k, v, KQ_ONE_APPROX, 0)
     dmax = int(np.max(np.abs(S_approx - S)))
     assert dmax <= 1, f"I2: α≈1(Q15_MAX), β=0 인데 상태가 {dmax} LSB 변했다 (1 이하여야 한다)"
 
@@ -124,7 +124,7 @@ def test_i3_beta0_output_is_prev_state_times_q(d):
     S = random_state(r, d)
     q, k, v = random_vec(r, d), random_vec(r, d), random_vec(r, d)
 
-    _, o, sat = step(S, q, k, v, ALPHA_ONE_EXACT, 0)
+    _, o, sat = step(S, q, k, v, ALPHA_ONE, 0)
     assert sat == 0
 
     want = np.array(
@@ -158,11 +158,11 @@ def test_i4_saturation_count_matches_hand_count(d):
     """
     S = np.full((d, d), Q15_MAX, dtype=np.int64)
     k = np.zeros(d, dtype=np.int64)
-    k[0] = ALPHA_ONE_EXACT                    # 정확히 1.0
+    k[0] = ALPHA_ONE                    # 정확히 1.0
     q = k.copy()
     v = np.full(d, Q15_MIN, dtype=np.int64)
 
-    S_next, o, sat = step(S, q, k, v, ALPHA_ONE_EXACT, ALPHA_ONE_EXACT)
+    S_next, o, sat = step(S, q, k, v, ALPHA_ONE, ALPHA_ONE)
 
     assert sat == d, (
         f"I4: 포화가 정확히 {d}회(행마다 1회) 나와야 한다. 관측 {sat}회. "
@@ -243,7 +243,11 @@ HALF = ONE_Q15 // 2       # 0.5 = 16384
 
 
 def _e1(k_and_q_one, alpha_one, beta_one):
-    """손계산 1단계를 주어진 '1.0 표현'으로 실행."""
+    """손계산 1단계를 주어진 '1.0 표현'으로 실행.
+
+    k_and_q_one : k, q 에 넣을 "1.0" (부호 있는 Q1.15)
+    alpha_one, beta_one : α, β 에 넣을 "1.0" (부호 없는 UQ1.15)
+    """
     S0 = np.zeros((2, 2), dtype=np.int64)
     k = np.array([k_and_q_one, 0], dtype=np.int64)
     q = k.copy()
@@ -252,12 +256,15 @@ def _e1(k_and_q_one, alpha_one, beta_one):
 
 
 def test_hand_worked_d2_exact_one():
-    """기대값 출처: 사용자 손계산 (docs/LOG.md 세션 6). 1.0 이 정확할 때 **완전 일치**해야 한다.
+    """기대값 출처: 사용자 손계산 (docs/LOG.md 세션 6·7). 오차 **0** 이어야 한다.
 
-    α=β=k=q=1.0 을 ONE_Q15(=32768)로 둔다. 이 값은 16비트 필드를 넘지만
-    골든 모델은 파이썬 정수라 정확히 표현된다. 수식 자체가 맞는지 보는 테스트다.
+    α=β 는 UQ1.15 의 0x8000 = 1.0 으로, **실제 형식 그대로 정확하다**
+    (spec/deltarule.md 1절). k=q 도 1.0 으로 두어 손계산 그대로를 재현한다 —
+    k, q 는 부호 있는 Q1.15 라 1.0 이 없지만, 이 테스트는 **수식과 양자화 순서가
+    맞는지**를 보는 것이므로 1.0 을 그대로 넣는다.
+    실제로 표현 가능한 k, q 만 쓴 경우는 아래 test_hand_worked_d2_representable_q15.
     """
-    (S1, o1, sat1), k, q = _e1(ONE_Q15, ONE_Q15, ONE_Q15)
+    (S1, o1, sat1), k, q = _e1(ONE_Q15, UQ15_ONE, UQ15_ONE)
     assert sat1 == 0, f"1단계에서 포화가 나면 안 된다 (관측 {sat1})"
 
     want_S1 = np.array([[3 * U, 0], [5 * U, 0]], dtype=np.int64)
@@ -267,7 +274,7 @@ def test_hand_worked_d2_exact_one():
 
     # 2단계: v=[7,1]·u, β=1/2, α=1
     v2 = np.array([7 * U, 1 * U], dtype=np.int64)
-    S2, o2, sat2 = step(S1, q, k, v2, ONE_Q15, HALF)
+    S2, o2, sat2 = step(S1, q, k, v2, UQ15_ONE, HALF)
     assert sat2 == 0, f"2단계에서 포화가 나면 안 된다 (관측 {sat2})"
 
     want_S2 = np.array([[5 * U, 0], [3 * U, 0]], dtype=np.int64)
@@ -279,37 +286,36 @@ def test_hand_worked_d2_exact_one():
 
 
 def test_hand_worked_d2_representable_q15():
-    """기대값 출처: 위와 같은 손계산. 1.0 을 표현 가능한 Q15_MAX 로 쓸 때의 오차를 고정한다.
+    """기대값 출처: 위와 같은 손계산. k, q 를 표현 가능한 값으로만 쓸 때의 오차를 고정한다.
 
-    Q1.15 에는 1.0 이 없다 (최대 32767/32768 = 0.999969...). 그래서 α·β·k·q 를
-    "1.0" 대신 Q15_MAX 로 넣으면 **≈1.0 을 곱할 때마다 최대 1 LSB** 를 잃는다.
-    허용 오차를 임의로 정하지 않고, **연쇄에 들어간 ≈1.0 곱셈 횟수**로 정한다:
+    α, β 는 UQ1.15 라 1.0 이 **정확하다**. 남은 근사는 k, q 뿐이다 —
+    이들은 부호 있는 Q1.15 라 1.0 이 없어 Q15_MAX(0.999969...)를 쓴다.
 
-        S1[i][0] : berr = β·v (1회) → ·k (1회)              = 2회 → ≤ 2 LSB
-        o1[i]    : 위에 ·q (1회) 추가                        = 3회 → ≤ 3 LSB
-        S2[i][0] : α·S1 + β·err·k — β=0.5 는 정확하고 오차가
-                   상쇄되는 방향이라 실측 1 LSB                      ≤ 3 LSB
+    허용 오차를 임의로 정하지 않고 **연쇄에 들어간 ≈1.0 곱셈 횟수**로 정한다:
 
-    실측(2026-09-11): S1 오차 2, o1 오차 3, S2 오차 1.
-    **이 숫자가 커지면 골든 모델이나 Q1.15 형식 정의가 바뀐 것이다.**
-    α/β/k/q 의 1.0 표현 문제는 W4-1(spec/deltarule.md)에서 필드 폭과 함께 결론낸다.
+        S1[i][0] : berr = β·v (β 정확) → ·k (근사 1회)   = 1회 → ≤ 1 LSB
+        o1[i]    : 위에 ·q (근사 1회) 추가                = 2회 → ≤ 2 LSB
+        S2[i][0] : α 정확, β=0.5 정확, 오차 상쇄          실측 0 → ≤ 2 LSB
+
+    실측(2026-09-11, α/β UQ1.15 적용 후): S1 1, o1 2, S2 0.
+    **UQ1.15 로 바꾸기 전에는 3/2/1 이었다** — α, β 가 근사였기 때문이다.
+    이 숫자가 커지면 골든 모델이나 숫자 형식 정의가 바뀐 것이다.
     """
-    (S1, o1, _), k, q = _e1(Q15_MAX, Q15_MAX, Q15_MAX)
+    (S1, o1, _), k, q = _e1(KQ_ONE_APPROX, UQ15_ONE, UQ15_ONE)
     want_S1 = np.array([[3 * U, 0], [5 * U, 0]], dtype=np.int64)
     want_o1 = np.array([3 * U, 5 * U], dtype=np.int64)
 
     dS1 = int(np.max(np.abs(S1 - want_S1)))
     do1 = int(np.max(np.abs(o1 - want_o1)))
-    assert dS1 <= 2, f"1단계 S 오차 {dS1} LSB (≈1.0 곱 2회 → 2 이하): {S1.tolist()} vs {want_S1.tolist()}"
-    assert do1 <= 3, f"1단계 o 오차 {do1} LSB (≈1.0 곱 3회 → 3 이하): {o1.tolist()} vs {want_o1.tolist()}"
+    assert dS1 <= 1, f"1단계 S 오차 {dS1} LSB (≈1.0 곱 1회 → 1 이하): {S1.tolist()} vs {want_S1.tolist()}"
+    assert do1 <= 2, f"1단계 o 오차 {do1} LSB (≈1.0 곱 2회 → 2 이하): {o1.tolist()} vs {want_o1.tolist()}"
 
     v2 = np.array([7 * U, 1 * U], dtype=np.int64)
-    S2, _, _ = step(S1, q, k, v2, Q15_MAX, HALF)
+    S2, _, _ = step(S1, q, k, v2, UQ15_ONE, HALF)
     want_S2 = np.array([[5 * U, 0], [3 * U, 0]], dtype=np.int64)
     dS2 = int(np.max(np.abs(S2 - want_S2)))
-    assert dS2 <= 3, f"2단계 S 오차 {dS2} LSB: {S2.tolist()} vs {want_S2.tolist()}"
+    assert dS2 <= 2, f"2단계 S 오차 {dS2} LSB: {S2.tolist()} vs {want_S2.tolist()}"
 
-    # 비율은 그대로여야 한다 — 1/8 스케일을 되돌리면 손계산 정수가 나온다
     assert [round(int(x) / U) for x in S2[:, 0]] == [5, 3], (
         f"2단계 S 열0 을 1/8 스케일로 되돌리면 [5,3] 이어야 한다: {S2[:, 0].tolist()}"
     )

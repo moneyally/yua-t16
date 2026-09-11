@@ -25,7 +25,16 @@ DESIGN.md 2절 "주의"가 못박은 **정확한 전개**:
 
 숫자 형식 (DESIGN.md 3절)
 -------------------------
-    Q1.15  : int16, 값 = raw / 2^15, 범위 [-1.0, +0.999969...]
+    Q1.15  : **부호 있는** int16. 값 = raw / 2^15, 범위 [-1.0, +0.999969...]
+             → S, q, k, v, p, err, o 전부 이 형식.
+    UQ1.15 : **부호 없는** uint16. 값 = raw / 2^15, 범위 [0, 2).
+             → α, β 만 이 형식. **0x8000 = 1.0 이 정확히 표현된다.**
+             α, β 는 정의상 음수가 아니므로 부호 비트를 버려도 잃는 것이 없고,
+             부호 있는 Q1.15 에 없는 1.0 을 정확히 얻는다.
+             스펙상 **1.0 초과는 미정의**다 — 골든은 ValueError, RTL 은 0x8000 으로
+             클램프하고 트레이스에 CLAMP_EVENT 를 남긴다 (spec/deltarule.md).
+             하드웨어에서는 "부호 있는 Q1.15 × 부호 없는 UQ1.15" 곱셈
+             (17비트 부호 확장) 으로 자연스럽게 처리된다.
     곱     : Q1.15 × Q1.15 = Q2.30 (int32)
     누산   : 40비트
     재양자화: Q2.30 → Q1.15, **round-half-to-even**
@@ -59,12 +68,38 @@ import numpy as np
 # Q1.15 상수
 # ---------------------------------------------------------------------------
 FRAC_BITS = 15
-ONE_Q15 = 1 << FRAC_BITS          # 1.0 은 Q1.15 로 표현할 수 없다 (32768 > 32767)
-Q15_MAX = (1 << 15) - 1           # +32767  = +0.999969482421875
-Q15_MIN = -(1 << 15)              # -32768  = -1.0
+ONE_Q15 = 1 << FRAC_BITS          # 32768 = 0x8000 = 1.0
+                                  #   부호 있는 Q1.15 에는 없다 (최대 32767).
+                                  #   부호 없는 UQ1.15 에는 **정확히 있다** → α, β 가 쓴다.
+Q15_MAX = (1 << 15) - 1           # +32767  = +0.999969482421875 (부호 있는 Q1.15 최대)
+Q15_MIN = -(1 << 15)              # -32768  = -1.0               (부호 있는 Q1.15 최소)
+UQ15_ONE = ONE_Q15                # 0x8000 = 1.0 (UQ1.15)
+UQ15_MAX_DEFINED = UQ15_ONE       # 스펙상 정의된 상한. 초과는 미정의.
 ACC_BITS = 40                     # DESIGN.md 3절: 누산 40비트
 ACC_MAX = (1 << (ACC_BITS - 1)) - 1
 ACC_MIN = -(1 << (ACC_BITS - 1))
+
+
+def check_uq15_gate(value: int, name: str) -> int:
+    """α, β 가 UQ1.15 의 **정의된** 범위 [0, 0x8000] 안인지 확인한다.
+
+    UQ1.15 자체는 [0, 2) 를 표현하지만 `spec/deltarule.md` 는 **1.0 초과를 미정의**로
+    둔다 (α 는 감쇠, β 는 학습률이라 1 을 넘을 이유가 없다).
+    골든 모델은 미정의 입력을 **조용히 처리하지 않는다** — ValueError 를 낸다.
+    RTL 은 0x8000 으로 클램프하고 트레이스에 CLAMP_EVENT 를 남긴다.
+    """
+    v = int(value)
+    if v < 0:
+        raise ValueError(
+            f"{name}={v}: α/β 는 부호 없는 UQ1.15 다. 음수는 허용되지 않는다."
+        )
+    if v > UQ15_MAX_DEFINED:
+        raise ValueError(
+            f"{name}={v} (0x{v:04X}) > 0x8000: 1.0 초과는 spec/deltarule.md 에서 "
+            f"미정의다. 골든 모델은 클램프하지 않는다 — 호출 쪽에서 정리할 것. "
+            f"(RTL 은 0x8000 으로 클램프하고 CLAMP_EVENT 를 남긴다)"
+        )
+    return v
 
 
 class SatCounter:
@@ -148,8 +183,15 @@ def float_to_q15(x: float) -> int:
 
 
 def q15_to_float(x: int) -> float:
-    """Q1.15 raw → float. 비교·보고용."""
+    """Q1.15 raw → float. 비교·보고용. UQ1.15 도 같은 스케일이라 그대로 쓸 수 있다."""
     return float(x) / ONE_Q15
+
+
+def float_to_uq15(x: float) -> int:
+    """float → UQ1.15 raw. α, β 생성용. [0, 1.0] 밖이면 ValueError."""
+    if x < 0.0 or x > 1.0:
+        raise ValueError(f"α/β 는 [0, 1] 이어야 한다: {x}")
+    return check_uq15_gate(int(round(x * ONE_Q15)), "value")
 
 
 # ---------------------------------------------------------------------------
@@ -162,8 +204,9 @@ def step(S, q, k, v, alpha: int, beta: int):
     ----
     S     : (d, d) int, Q1.15 상태 행렬
     q,k,v : (d,)   int, Q1.15 벡터
-    alpha : int, Q1.15 게이트  α ∈ (0, 1]
-    beta  : int, Q1.15 학습률  β ∈ (0, 1]
+    alpha : int, **UQ1.15** 게이트  α ∈ [0, 1].  0x8000 = 1.0 (정확)
+    beta  : int, **UQ1.15** 학습률  β ∈ [0, 1].  0x8000 = 1.0 (정확)
+            1.0 초과는 미정의 → ValueError
 
     반환
     ----
@@ -182,6 +225,9 @@ def step(S, q, k, v, alpha: int, beta: int):
     d = S.shape[0]
     assert S.shape == (d, d), f"S 는 정사각이어야 한다: {S.shape}"
     assert q.shape == k.shape == v.shape == (d,), "q/k/v 는 (d,) 여야 한다"
+
+    alpha = check_uq15_gate(alpha, "alpha")
+    beta = check_uq15_gate(beta, "beta")
 
     sat = SatCounter()
 
