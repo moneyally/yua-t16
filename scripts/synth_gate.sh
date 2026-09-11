@@ -204,7 +204,7 @@ if [ "$STAGE1_ONLY" -eq 1 ]; then
 fi
 
 # --- STAGE 2: full synth (전 모듈, 모듈당 타임아웃) --------------------------
-rm -f "$BUILD/.fail" "$BUILD/.timeout" "$BUILD/.zero" "$BUILD/.oom"
+rm -f "$BUILD/.fail" "$BUILD/.timeout" "$BUILD/.zero" "$BUILD/.oom" "$BUILD/.cells"
 echo ""
 echo "--- STAGE 2: synth -top (전 모듈, 모듈당 ${SYNTH_TIMEOUT}s, 병렬 ${JOBS}) ---"
 printf '%s\n' "${MODULES[@]}" | xargs -P "$JOBS" -I{} bash -c '
@@ -234,6 +234,7 @@ printf '%s\n' "${MODULES[@]}" | xargs -P "$JOBS" -I{} bash -c '
     echo "$m" >> "$BUILD/.zero"
   else
     printf "  ok      %-24s %-8s cells(design total)=%s\n" "$m" "$((t1-t0))s" "$cells"
+    echo "$m $cells" >> "$BUILD/.cells"
   fi
 ' _ {} "$BUILD" "$FLAT" "$YOSYS" "$SYNTH_TIMEOUT"
 
@@ -264,6 +265,51 @@ if [ -f "$BUILD/.oom" ]; then
   sed 's/^/       /' "$BUILD/.oom"
   echo "       JOBS=2 또는 JOBS=1 로 다시 돌려볼 것. 최종 판정은 Vivado."
 fi
+# --- 셀 수 회귀 검사 (docs/BUGS.md BUG-011) ---------------------------------
+# **기능 테스트는 면적 회귀를 못 잡는다.** 실제로 `mac_pe` 를 손대면서 논리적으로
+# 같은 식으로 바꿨는데 mac_array 가 +46% 커진 적이 있다. 전 테스트가 통과했다.
+# 잡은 것은 셀 수 비교뿐이었다. 그래서 게이트에 넣는다.
+#
+# 기준선: scripts/cell_baseline.txt  ("모듈 셀수" 한 줄씩)
+#   - 증가 10% 초과  -> **FAIL**. 의도한 변경이면 기준선을 고쳐서 커밋한다
+#   - 감소 / 신규     -> WARN 만. 줄어드는 건 보통 좋은 일이고, 신규는 기준선에 추가하라고 알린다
+N_CELLGROW=0
+CELL_BASE="$(dirname "$0")/cell_baseline.txt"
+if [ -f "$BUILD/.cells" ] && [ -f "$CELL_BASE" ]; then
+  echo ""
+  echo "--- 셀 수 회귀 검사 (기준선: scripts/cell_baseline.txt) ---"
+  CELL_REPORT=$(awk -v base="$CELL_BASE" '
+    BEGIN { while ((getline line < base) > 0) {
+              if (line ~ /^#/ || line == "") continue
+              split(line, a, /[ \t]+/); b[a[1]] = a[2] } }
+    { now[$1] = $2 }
+    END {
+      grow = 0
+      for (m in now) {
+        if (!(m in b)) { printf "  NEW     %-24s %s (기준선에 추가할 것)\n", m, now[m]; continue }
+        if (b[m] == 0) continue
+        d = (now[m] - b[m]) * 100.0 / b[m]
+        if (d > 10.0)      { printf "  GROW    %-24s %s -> %s (+%.1f%%)  <- 의도한 변경인가?\n", m, b[m], now[m], d; grow++ }
+        else if (d < -5.0) { printf "  shrink  %-24s %s -> %s (%.1f%%)\n", m, b[m], now[m], d }
+      }
+      printf "GROWCOUNT=%d\n", grow
+    }' "$BUILD/.cells")
+  echo "$CELL_REPORT" | grep -v '^GROWCOUNT=' || true
+  N_CELLGROW=$(echo "$CELL_REPORT" | sed -n 's/^GROWCOUNT=//p')
+  if [ "${N_CELLGROW:-0}" -eq 0 ]; then
+    echo "  ok    기준선 대비 10% 초과 증가 없음"
+  else
+    echo ""
+    echo "FAIL: 셀 수가 기준선보다 10% 넘게 늘어난 모듈 ${N_CELLGROW}개."
+    echo "      의도한 변경이면 **이유를 커밋 메시지에 적고** scripts/cell_baseline.txt 를 갱신한다:"
+    echo "        cp build/synth_gate/.cells scripts/cell_baseline.txt   # 확인 후에만"
+  fi
+elif [ -f "$BUILD/.cells" ]; then
+  echo ""
+  echo "WARN: scripts/cell_baseline.txt 이 없다 — 셀 수 회귀를 못 본다."
+  echo "      만들려면: cp build/synth_gate/.cells scripts/cell_baseline.txt"
+fi
+
 N_ZERO=0
 if [ -f "$BUILD/.zero" ]; then
   N_ZERO=$(sort -u "$BUILD/.zero" | wc -l)
@@ -274,6 +320,9 @@ fi
 if [ "$N_FAIL" -gt 0 ]; then
   echo "합성 실패 모듈:"; printf '       %s\n' "${S2_REAL[@]}"
   fail "STAGE 2 합성 실패 ${N_FAIL}개"
+fi
+if [ "${N_CELLGROW:-0}" -gt 0 ]; then
+  fail "셀 수 회귀 ${N_CELLGROW}개 (기준선 +10% 초과). docs/BUGS.md BUG-011 참조"
 fi
 if [ "$STRICT" -eq 1 ] && [ $(( N_TMO + E_TMO + N_OOM )) -gt 0 ]; then
   fail "--strict: 미측정 $(( N_TMO + E_TMO + N_OOM ))개(시간 초과/OOM)를 실패로 처리"

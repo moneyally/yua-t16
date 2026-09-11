@@ -30,6 +30,9 @@ module mac_array (
           .acc_clr (acc_clr),
           .a       (a_row[i]),
           .b       (b_col[j]),
+          // DUAL=0 (기본) 이라 두 번째 곱은 생성되지 않는다. 0 으로 묶는다.
+          .a2      (8'sd0),
+          .b2      (8'sd0),
           .acc     (acc_out_flat[LSB +: 32])
         );
       end

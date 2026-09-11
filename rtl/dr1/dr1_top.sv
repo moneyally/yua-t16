@@ -17,7 +17,9 @@
 // ----------------------------------------------------------------------------
 // DELTA_STEP 의 단계와 골든 대응
 // ----------------------------------------------------------------------------
-//   ST_LOAD    q,k,v 를 스크래치 → vec_regs        (골든: 인자 그 자체)
+//   ST_LOAD_K  k 만 적재하고 기다린다 (p = S·k 에 바로 필요하다)
+//              **v 는 MV_K 와, q 는 UPD 와 겹쳐서 적재한다** — 스크래치 포트가
+//              그 구간에 놀고 있기 때문이다. 덕분에 적재 50사이클이 18로 줄었다.
 //   ST_MV_K    p = S·k                             (골든: matvec)
 //   ST_ERR     err = v − α·p                       (골든: compute_err)
 //   ST_UPD_*   행마다 S[i] ← α·S[i] + β·err[i]·kᵀ  (골든: update_row × d)
@@ -127,7 +129,7 @@ module dr1_top #(
     ST_INIT      = 4'd1,
     ST_DUMP_RD   = 4'd2,   // 상태 행 읽기 요청
     ST_DUMP_WR   = 4'd3,   // 행의 원소를 스크래치로 (D사이클)
-    ST_LOAD      = 4'd4,   // q,k,v 를 스크래치 → vec_regs
+    ST_LOAD_K    = 4'd4,   // k 적재 대기. v/q 는 뒤 단계와 **겹쳐서** 적재한다
     ST_MV_K      = 4'd5,   // p = S·k
     ST_ERR       = 4'd6,   // err = v − α·p
     ST_UPD_RD    = 4'd7,   // S[i] 읽기 요청
@@ -143,7 +145,8 @@ module dr1_top #(
 
   logic [7:0]  opcode_r, slot_r, fault_r;
   logic [15:0] alpha_r, beta_r;
-  logic [SAW-1:0] q_base, k_base, v_base, o_base, dump_base;
+  // k_base 는 없다 — k 적재는 명령을 받는 사이클에 cmd_k_addr 에서 바로 건다.
+  logic [SAW-1:0] q_base, v_base, o_base, dump_base;
 
   // ==========================================================================
   // 하위 블록
@@ -295,22 +298,28 @@ module dr1_top #(
   logic [PW-1:0]  issue_ptr, emit_ptr;   // DUMP 행
   logic [PW-1:0]  elem_ptr;              // DUMP 행 안의 열 / WR_O 인덱스
   logic           rd_pending;
-  logic [AW+2:0]  ld_cnt;                // 0 .. 3D  (q,k,v 연속)
-  logic           ld_pending;
+  // ── 벡터 적재기 (main FSM 과 **병렬로 돈다**) ──────────────────────────
+  // 스크래치는 1원소/사이클이라 q,k,v 를 다 읽으면 3d+2 = 50 사이클이다.
+  // 그런데 k 만 즉시 필요하고, v 는 ERR 단계, q 는 MV_Q 단계에서야 쓰인다.
+  // 그래서 적재기를 따로 두고 계산과 겹친다:
+  //   k → ST_LOAD_K 에서 (기다린다)
+  //   v → ST_MV_K 동안 (숨는다)
+  //   q → 갱신 루프 동안 (숨는다)
+  logic           ld_run;                // 적재 중
+  logic [1:0]     ld_sel;                // 지금 적재하는 벡터
+  logic [SAW-1:0] ld_base;               // 스크래치 시작 원소
+  logic [PW-1:0]  ld_i;                  // 0 .. D  (요청 인덱스)
+  logic           ld_pending;            // 직전 사이클에 요청했다
   logic [1:0]     ld_sel_d;
   logic [AW-1:0]  ld_idx_d;
+
+  // 적재 완료 = 요청을 다 흘렸고 마지막 데이터까지 썼다
+  wire ld_done = !ld_run && !ld_pending;
   logic [PW-1:0]  upd_idx;               // 갱신 중인 행
   logic [D*W-1:0] dump_row_hold;
 
-  localparam logic [AW+2:0] LD_TOTAL = (AW+3)'(3 * D);
-
-  // 적재 카운터를 벡터별 오프셋으로 쪼갠 것. 식에 바로 비트 선택을 붙일 수 없어
-  // (SystemVerilog 문법) 중간 신호로 둔다. AW 비트로 캐스팅해서 잘라 두면
-  // 상위 비트가 남지 않는다 (verilator UNUSEDSIGNAL 방지).
-  wire [AW-1:0] ld_off_k = AW'(ld_cnt - (AW+3)'(D));
-  wire [AW-1:0] ld_off_v = AW'(ld_cnt - (AW+3)'(2 * D));
-
   // DUMP 행 우선 오프셋: (행 번호) × D. emit_ptr 은 이미 1 증가한 뒤라 1을 뺀다.
+  wire [PW-1:0]  upd_next     = upd_idx + PW'(1);      // 다음 갱신 행
   wire [PW-1:0]  dump_row_idx = emit_ptr - PW'(1);
   wire [SAW-1:0] dump_row_off = SAW'(dump_row_idx) * SAW'(D);
 
@@ -324,7 +333,7 @@ module dr1_top #(
         if (cmd_valid) begin
           if      (decode_fault != FC_NONE) state_n = ST_DONE_ERR;
           else if (decode_is_init)          state_n = ST_INIT;
-          else if (decode_is_step)          state_n = ST_LOAD;
+          else if (decode_is_step)          state_n = ST_LOAD_K;
           else if (decode_is_dump)          state_n = ST_DUMP_RD;
           else                              state_n = ST_DONE_ERR;  // 방어
         end
@@ -338,12 +347,19 @@ module dr1_top #(
                     state_n = (issue_ptr >= D_CNT) ? ST_DONE_OK : ST_DUMP_RD;
 
       // ── STEP ──
-      ST_LOAD:      if (ld_cnt >= LD_TOTAL && !ld_pending) state_n = ST_MV_K;
-      ST_MV_K:      if (mv_done)  state_n = ST_ERR;
+      // k 를 다 받으면 MV_K 로. v 적재는 거기서 **겹쳐서** 시작한다.
+      ST_LOAD_K:    if (ld_done)  state_n = ST_MV_K;
+      // ERR 은 v 가 있어야 한다 — matvec 과 v 적재 **둘 다** 끝나야 나간다.
+      // (v 적재 18 < matvec 20 이라 실제로는 matvec 이 결정한다)
+      ST_MV_K:      if (mv_done && ld_done) state_n = ST_ERR;
       ST_ERR:       state_n = ST_UPD_RD;
       ST_UPD_RD:    state_n = ST_UPD_START;
       ST_UPD_START: state_n = ST_UPD_WAIT;
-      ST_UPD_WAIT:  if (up_done) state_n = (upd_idx + PW'(1) >= D_CNT) ? ST_MV_Q : ST_UPD_RD;
+      // 다음 행은 ST_UPD_START 에서 이미 읽어 뒀다 — RD 로 돌아가지 않는다
+      // 마지막 행을 끝냈으면 q 적재까지 확인하고 MV_Q 로 간다 (보통 이미 끝나 있다)
+      ST_UPD_WAIT:  if (up_done) state_n = (upd_next >= D_CNT)
+                                          ? (ld_done ? ST_MV_Q : ST_UPD_WAIT)
+                                          : ST_UPD_START;
       ST_MV_Q:      if (mv_done) state_n = ST_WR_O;
       ST_WR_O:      if (elem_ptr >= D_CNT) state_n = ST_DONE_OK;
 
@@ -373,6 +389,12 @@ module dr1_top #(
     end else if (state == ST_UPD_RD) begin
       sram_rd_en  = 1'b1;
       sram_rd_row = upd_idx[AW-1:0];
+    end else if (state == ST_UPD_START) begin
+      // **다음 행을 미리 읽는다.** update_unit 은 이 사이클에 현재 행(sram_rd_data)을
+      // 이미 래치했으므로, 지금 새 읽기를 걸어도 안전하다. 이것 덕분에 행마다
+      // ST_UPD_RD 로 돌아갈 필요가 없어서 3사이클/행이 된다 (4 → 3).
+      sram_rd_en  = (upd_next < D_CNT);
+      sram_rd_row = upd_next[AW-1:0];
     end else if (mv_phase) begin
       sram_rd_en  = mv_rd_en;
       sram_rd_row = mv_rd_row;
@@ -401,12 +423,9 @@ module dr1_top #(
     scr_wr_addr = '0;
     scr_wr_data = '0;
 
-    if (state == ST_LOAD && ld_cnt < LD_TOTAL) begin
-      scr_rd_en = 1'b1;
-      // ld_cnt 0..D-1 = q, D..2D-1 = k, 2D..3D-1 = v
-      if      (ld_cnt < (AW+3)'(D))     scr_rd_addr = q_base + SAW'(ld_cnt);
-      else if (ld_cnt < (AW+3)'(2 * D)) scr_rd_addr = k_base + SAW'(ld_cnt - (AW+3)'(D));
-      else                              scr_rd_addr = v_base + SAW'(ld_cnt - (AW+3)'(2 * D));
+    if (ld_run) begin
+      scr_rd_en   = 1'b1;
+      scr_rd_addr = ld_base + SAW'(ld_i);
     end
 
     if (state == ST_WR_O && elem_ptr < D_CNT) begin
@@ -467,7 +486,6 @@ module dr1_top #(
       alpha_r         <= 16'h8000;
       beta_r          <= 16'd0;
       q_base          <= '0;
-      k_base          <= '0;
       v_base          <= '0;
       o_base          <= '0;
       dump_base       <= '0;
@@ -475,7 +493,10 @@ module dr1_top #(
       emit_ptr        <= '0;
       elem_ptr        <= '0;
       rd_pending      <= 1'b0;
-      ld_cnt          <= '0;
+      ld_run          <= 1'b0;
+      ld_sel          <= SEL_K;
+      ld_base         <= '0;
+      ld_i            <= '0;
       ld_pending      <= 1'b0;
       ld_sel_d        <= SEL_Q;
       ld_idx_d        <= '0;
@@ -503,6 +524,16 @@ module dr1_top #(
       if (clamp_add != 32'd0)   dr1_clamp_count <= dr1_clamp_count + clamp_add;
       else if (clamp_count_clr) dr1_clamp_count <= 32'd0;
 
+      // ── 적재기 (main FSM 과 병렬) ──────────────────────────────────
+      // 요청을 1원소/사이클로 흘리고, 1사이클 뒤 도착분을 vec_regs 에 쓴다.
+      if (ld_run) begin
+        ld_i <= ld_i + PW'(1);
+        if (ld_i + PW'(1) >= D_CNT) ld_run <= 1'b0;
+      end
+      ld_pending <= ld_run;
+      ld_sel_d   <= ld_sel;
+      ld_idx_d   <= ld_i[AW-1:0];
+
       case (state)
         ST_IDLE: begin
           if (cmd_valid) begin
@@ -512,7 +543,6 @@ module dr1_top #(
             alpha_r    <= alpha_eff;
             beta_r     <= beta_eff;
             q_base     <= cmd_q_addr[SAW:1];
-            k_base     <= cmd_k_addr[SAW:1];
             v_base     <= cmd_v_addr[SAW:1];
             o_base     <= cmd_dst_addr[SAW:1];
             dump_base  <= cmd_dst_addr[SAW:1];
@@ -520,10 +550,16 @@ module dr1_top #(
             emit_ptr   <= '0;
             elem_ptr   <= '0;
             rd_pending <= 1'b0;
-            ld_cnt     <= '0;
             ld_pending <= 1'b0;
             upd_idx    <= '0;
             if (decode_is_init) sram_clr_start <= 1'b1;
+            if (decode_is_step) begin
+              // k 부터. v/q 는 뒤 단계에서 겹쳐 시작한다.
+              ld_run  <= 1'b1;
+              ld_sel  <= SEL_K;
+              ld_base <= cmd_k_addr[SAW:1];
+              ld_i    <= '0;
+            end
           end
         end
 
@@ -544,25 +580,26 @@ module dr1_top #(
         end
 
         // ── STEP ──
-        ST_LOAD: begin
-          // 요청을 흘리고, 1사이클 뒤 도착분을 vec_regs 에 쓴다
-          if (ld_cnt < LD_TOTAL) ld_cnt <= ld_cnt + (AW+3)'(1);
-          ld_pending <= (ld_cnt < LD_TOTAL);
-          if (ld_cnt < (AW+3)'(D)) begin
-            ld_sel_d <= SEL_Q;
-            ld_idx_d <= ld_cnt[AW-1:0];
-          end else if (ld_cnt < (AW+3)'(2 * D)) begin
-            ld_sel_d <= SEL_K;
-            ld_idx_d <= ld_off_k[AW-1:0];
-          end else begin
-            ld_sel_d <= SEL_V;
-            ld_idx_d <= ld_off_v[AW-1:0];
+        ST_LOAD_K: begin
+          // k 가 끝나는 순간 v 적재를 건다 — 다음 사이클부터 MV_K 와 겹친다
+          if (ld_done) begin
+            ld_run  <= 1'b1;
+            ld_sel  <= SEL_V;
+            ld_base <= v_base;
+            ld_i    <= '0;
           end
         end
 
         ST_MV_K: if (mv_done) p_r <= mv_y_flat;
 
-        ST_ERR:  err_r <= err_comb;
+        ST_ERR: begin
+          err_r <= err_comb;
+          // q 적재를 여기서 건다 — 갱신 루프(49사이클) 뒤에 숨는다
+          ld_run  <= 1'b1;
+          ld_sel  <= SEL_Q;
+          ld_base <= q_base;
+          ld_i    <= '0;
+        end
 
         ST_UPD_RD: ;   // 읽기 요청만 (조합 출력)
 

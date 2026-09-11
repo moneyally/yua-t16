@@ -11,11 +11,11 @@ SystemVerilog RTL 과 Python 호스트 스택. **시뮬레이션 단계이며 �
 
 | 블록 | 상태 | 근거 |
 |---|---|---|
-| **ORBIT-DR1 델타룰 헤드 (d=16)** — `dr1_top` + `matvec_unit`/`update_unit`/`err_unit`/`requant_q15`/`state_sram`/`vec_regs`/`dr1_scratch` | **동작 + 비트 정확** | `DELTA_INIT`/`STEP`/`DUMP` 전부. 골든 `step()` 과 **1,000토큰 × 시드 3개 비트 일치** (`bash scripts/run_dr1_tb.sh`). `dr1_top` 124,461 cells |
+| **ORBIT-DR1 델타룰 헤드 (d=16)** — `dr1_top` + `matvec_unit`/`update_unit`/`err_unit`/`requant_q15`/`state_sram`/`vec_regs`/`dr1_scratch` | **동작 + 비트 정확** | `DELTA_INIT`/`STEP`/`DUMP` 전부. 골든 `step()` 과 **1,000토큰 × 시드 3개 비트 일치** (`bash scripts/run_dr1_tb.sh`). `dr1_top` 126사이클/토큰 |
 | **호스트 경로 E2E** — `dev.delta_step()` → 디스크립터 → RTL → 결과 | **동작** | `tb/tb_dr1_host_e2e.py` 6/6. 스크래치 MMIO 창 왕복 포함 |
 | **AXI4-Lite 브리지** — `axil_reg_bridge`, `dr1_soc_top` | **시뮬레이션 검증** | `tb/tb_axil_reg_bridge.py` 7/7. **보드에서는 안 돌려봤다** ([docs/FPGA.md](docs/FPGA.md)) |
 | `mac_pe`, `mac_array` — INT8 16×16 출력 고정 외적 누산 | **합성됨** | `mac_array` 196,352 cells (`scripts/synth_gate.sh`) |
-| 제어 평면 — `reg_top`, `desc_queue`, `desc_fsm_v2`, `irq_ctrl`, `trace_ring`, `oom_guard`, `reset_seq`, `cdc_fifo` | **합성됨** | `g2_ctrl_top` 666,029 cells (DR1 포함) |
+| 제어 평면 — `reg_top`, `desc_queue`, `desc_fsm_v2`, `irq_ctrl`, `trace_ring`, `oom_guard`, `reset_seq`, `cdc_fifo` | **합성됨** | `g2_ctrl_top` 885,159 cells (DR1 포함) |
 | `gemm_core` / `gemm_top` — DMA + MAC 오케스트레이션 | **합성됨** | 429,672 / 430,402 cells |
 | Python 호스트 스택 (`tools/`) — HAL, 디스크립터 패커, 레지스터맵 SSOT, 트레이스 디코더, CLI | **동작** | `python3 -m pytest tests/ -q` |
 | PCIe (`pcie_ep_versal`) | **스텁** | CPM AXI-Stream 포트가 연결되지 않았다. 호스트와 통신한 적 없음 |
@@ -26,8 +26,8 @@ SystemVerilog RTL 과 Python 호스트 스택. **시뮬레이션 단계이며 �
 
 ### 알려진 한계
 
-- **`DELTA_STEP` 은 토큰당 205 사이클**이다. `docs/DESIGN.md` 6절 계약 상한은 64 —
-  **3.2배 초과**다. 내역과 줄일 방법은 `docs/DESIGN.md` 6.2절에 적어 뒀다.
+- **`DELTA_STEP` 은 토큰당 126 사이클**이다. `docs/DESIGN.md` 6절 계약 상한은 64 —
+  **2.0배 초과**다 (최초 205에서 줄였다. 내역은 `docs/DESIGN.md` 6.2·6.3절).
   상한을 고쳐 쓰지 않았다.
 - **d=64 는 아직 안 된다.** 스크래치(1024 원소)에 64×64 덤프가 안 들어간다
   (`spec/deltarule.md` 3.6절). 4608 원소로 키워야 한다.
@@ -66,7 +66,16 @@ SystemVerilog RTL 과 Python 호스트 스택. **시뮬레이션 단계이며 �
 bash scripts/synth_gate.sh; echo $?     # 0 이어야 한다
 ```
 
-sv2v → yosys 로 `rtl/` 전체를 2단 검사한다 (elaborate + synth).
+sv2v → yosys 로 `rtl/` 전체를 3단 검사한다:
+1. **elaborate + `check -assert`** — undriven 포트, 다중 드라이버 같은 구조 오류
+2. **`synth -top`** — 합성이 끝까지 도는지, 0셀로 사라지지 않는지
+3. **셀 수 회귀** — `scripts/cell_baseline.txt` 대비 **+10% 초과면 FAIL**
+
+3번이 있는 이유: **기능 테스트는 면적 회귀를 못 잡는다.** 실제로 논리적으로 같은
+식으로 바꿨는데 `mac_array` 가 +46% 커진 적이 있고, 그때 cocotb 는 전부 통과했다
+([docs/BUGS.md](docs/BUGS.md) BUG-011). 의도한 증가면 기준선을 갱신하고 이유를
+커밋 메시지에 적는다.
+
 **일일 게이트다. 최종 합성·타이밍 판정은 Vivado 로만 한다.**
 기본 예산(모듈당 240s)으로는 `g2_ctrl_top` 이 시간 초과로 뜬다 — 정상이다.
 전부 잡으려면 `SYNTH_TIMEOUT=420`. 빠른 확인만 하려면 `--stage1`.

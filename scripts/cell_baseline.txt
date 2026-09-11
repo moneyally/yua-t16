@@ -1,0 +1,53 @@
+# cell_baseline.txt — yosys 합성 셀 수 기준선 (scripts/synth_gate.sh 가 대조한다)
+#
+# 왜 있는가: **기능 테스트는 면적 회귀를 못 잡는다.** 논리적으로 같은 식으로
+# 바꿨는데 mac_array 가 +46% 커진 적이 있고, 그때 cocotb·pytest 가 전부 통과했다
+# (docs/BUGS.md BUG-011). 잡은 것은 셀 수 비교뿐이었다.
+#
+# 규칙: 기준선 대비 **+10% 초과면 게이트 FAIL**. 의도한 증가면 이 파일을 갱신하고
+#       **이유를 커밋 메시지에 적는다**. 갱신은 확인한 뒤에만:
+#         cp build/synth_gate/.cells scripts/cell_baseline.txt
+#
+# 기록: 2026-09-11, yosys 0.33 + sv2v v0.0.13, SYNTH_TIMEOUT=420 JOBS=2
+# 시간 초과로 측정 못 한 모듈(backward_engine, g3_int_top, gemm_int4_synth,
+# mxu_bf16_16x16)은 여기 없다 — 없으면 NEW 로 표시되고 실패로 치지 않는다.
+#
+act_sram 99294
+axil_reg_bridge 205
+cdc_fifo 1167
+ctrl_fsm 499
+desc_fsm_v2 2844
+desc_queue 66031
+dma_bridge 880
+dr1_scratch 17762
+dr1_soc_top 885352
+dr1_tb_wrap 232322
+dr1_top 157357
+err_unit 31480
+g2_ctrl_top 885159
+g2_protob_top 886338
+g3_desc_fsm 2897
+gemm_core 429672
+gemm_int4_fpga 50556
+gemm_int4_sky130 43835
+gemm_stub 203
+gemm_top 430404
+gemm_wb_wrapper 71258
+irq_ctrl 549
+mac_array 196352
+mac_pe 730
+matvec_tb_wrap 43484
+matvec_unit 34956
+oom_guard 3748
+pcie_ep_versal 4
+reg_top 7612
+requant_q15 172
+reset_seq 52
+scale_fabric_ctrl 60
+state_sram 8516
+trace_ring 143610
+update_unit 75169
+vec_regs 3202
+vpu_core_synth 116795
+vpu_lut 1130
+wgt_sram 99294

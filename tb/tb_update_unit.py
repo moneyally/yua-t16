@@ -26,7 +26,7 @@ from tools.orbit_pack import pack_vec, to_bits, unpack_vec  # noqa: E402
 
 D = 16
 W = 16
-CYCLE_BUDGET = D + 6        # 계약 상한 (DESIGN.md 6.1)
+CYCLE_BUDGET = D + 6        # 계약 상한 (DESIGN.md 6.1). 실측은 테스트가 찍는다
 
 
 async def reset_dut(dut):

@@ -13,10 +13,14 @@
 // 구조 — 행 하나를 D개 PE 가 동시에 처리한다 (CLAUDE.md 0절: mac_array 를
 // 새로 만들지 말고 진화시킨다. 여기 쓰는 셀은 기존 `rtl/mac_pe.sv` 다)
 // ----------------------------------------------------------------------------
-//   열 j 마다 PE 하나:
-//     MAC1:  acc_j  = α      · S_row[j]     (a=17비트 부호 있음, b=Q1.15)
-//     MAC2:  acc_j += berr   · k[j]
-//     CAP :  row[j] = requant_q15(acc_j)    ← 재양자화는 여기 한 번뿐
+//   열 j 마다 PE 하나 (`mac_pe #(.DUAL(1))` — 한 사이클에 곱 두 개):
+//     MAC:  acc_j = α·S_row[j] + berr·k[j]   (두 항이 **같은 사이클**에 들어간다)
+//     CAP:  row[j] = requant_q15(acc_j)      ← 재양자화는 여기 한 번뿐
+//
+//   W7 까지는 MAC1/MAC2 로 두 사이클을 썼다 (누산기를 두 번 돌렸다). 항이 정확히
+//   2개뿐이라 누산기를 돌릴 이유가 없어서, mac_pe 에 DUAL 모드를 넣고 한 사이클로
+//   줄였다. **행당 4사이클 → 2사이클.** 골든과의 비트 일치는 그대로다
+//   (덧셈 순서가 같고, 재양자화는 여전히 마지막에 한 번이다).
 //
 //   berr = requant_q15(β · err_i)  — 골든의 q15_mul(β, err) 과 같은 조각.
 //   requant_q15 를 여기서도 쓰기 때문에 반올림 규칙은 여전히 한 곳에만 있다.
@@ -26,7 +30,7 @@
 //   같은 이유로 절대 발동하지 않는다 — 그래서 sat_count 는 berr 재양자화 1회와
 //   행 재양자화 D회에서만 나온다.
 //
-//   사이클: start 부터 done 까지 **5** (D 와 무관). 계약 상한 D+6 이내.
+//   사이클: start 부터 done 까지 **3** (D 와 무관). 계약 상한 D+6 이내.
 //   D 와 무관한 이유는 열 방향을 펼쳤기 때문이다. 행 방향(D행)은 dr1_top 이
 //   돌린다 — W7 에서 "행 스트리밍" 이 된다.
 //
@@ -53,19 +57,20 @@ module update_unit #(
   input  wire [D*W-1:0]       s_row_flat,   // 평탄화: 원소 j = bits[j*W +: W]
   input  wire [D*W-1:0]       k_flat,
 
-  output logic [D*W-1:0]      row_flat,     // 갱신된 행
-  output logic [31:0]         sat_count,    // 이번 실행의 포화 횟수
+  // row_flat / sat_count 는 **조합 출력**이다. `done` 이 1 인 사이클에 유효하다.
+  // (레지스터로 한 번 더 받으면 done 보다 한 사이클 늦어져서 계약이 깨진다 —
+  //  실제로 dr1_top 쪽에서 그 실수를 했다: docs/BUGS.md BUG-009)
+  output logic [D*W-1:0]      row_flat,     // 갱신된 행. done 사이클에 유효
+  output logic [31:0]         sat_count,    // 이번 실행의 포화 횟수. done 사이클에 유효
   output logic [31:0]         cycles,       // 이번 실행의 실측 사이클 수
   output logic                busy,
   output logic                done          // 정확히 1사이클 펄스
 );
 
-  typedef enum logic [2:0] {
-    ST_IDLE = 3'd0,
-    ST_MAC1 = 3'd1,   // acc  = α · S_row
-    ST_MAC2 = 3'd2,   // acc += berr · k
-    ST_CAP  = 3'd3,   // requant + 기록
-    ST_DONE = 3'd4
+  typedef enum logic [1:0] {
+    ST_IDLE = 2'd0,
+    ST_MAC  = 2'd1,   // acc = α·S_row + berr·k   (mac_pe DUAL)
+    ST_CAP  = 2'd2    // requant 결과가 유효한 사이클 = done
   } state_t;
 
   state_t state, state_n;
@@ -99,8 +104,7 @@ module update_unit #(
   wire signed [16:0] alpha_s  = $signed({1'b0, alpha_r});
   wire signed [16:0] berr_ext = $signed({berr[W-1], berr});   // 부호 확장 16 -> 17
 
-  wire signed [16:0] pe_a = (state == ST_MAC1) ? alpha_s : berr_ext;
-  wire               pe_en      = (state == ST_MAC1) || (state == ST_MAC2);
+  wire               pe_en      = (state == ST_MAC);
   wire               pe_acc_clr = (state == ST_IDLE);
 
   wire signed [ACC_W-1:0] pe_acc [0:D-1];
@@ -112,15 +116,19 @@ module update_unit #(
     for (j = 0; j < D; j = j + 1) begin : g_pe
       wire signed [W-1:0] s_j = $signed(s_row_r[j*W +: W]);
       wire signed [W-1:0] k_j = $signed(k_r    [j*W +: W]);
-      wire signed [W-1:0] pe_b = (state == ST_MAC1) ? s_j : k_j;
 
-      mac_pe #(.A_W(17), .B_W(W), .ACC_W(ACC_W)) u_pe (
+      // 한 사이클에 α·S[j] 와 berr·k[j] 를 모두 넣는다 (DUAL=1).
+      // 골든 update_row 의 덧셈 순서(α·S 먼저, 그 다음 berr·k)와 같다 —
+      // 정수 덧셈이라 순서가 결과를 바꾸지 않지만, 순서를 맞춰 두면 읽기 쉽다.
+      mac_pe #(.A_W(17), .B_W(W), .ACC_W(ACC_W), .DUAL(1)) u_pe (
         .clk     (clk),
         .rst_n   (rst_n),
         .en      (pe_en),
         .acc_clr (pe_acc_clr),
-        .a       (pe_a),
-        .b       (pe_b),
+        .a       (alpha_s),
+        .b       (s_j),
+        .a2      (berr_ext),
+        .b2      (k_j),
         .acc     (pe_acc[j])
       );
 
@@ -148,17 +156,23 @@ module update_unit #(
   always_comb begin
     state_n = state;
     case (state)
-      ST_IDLE: if (start) state_n = ST_MAC1;
-      ST_MAC1: state_n = ST_MAC2;
-      ST_MAC2: state_n = ST_CAP;
-      ST_CAP:  state_n = ST_DONE;
-      ST_DONE: state_n = ST_IDLE;
+      ST_IDLE: if (start) state_n = ST_MAC;
+      ST_MAC:  state_n = ST_CAP;
+      ST_CAP:  state_n = ST_IDLE;
       default: state_n = ST_IDLE;
     endcase
   end
 
   assign busy = (state != ST_IDLE);
-  assign done = (state == ST_DONE);
+  assign done = (state == ST_CAP);     // 이 사이클에 row_flat/sat_count 가 유효하다
+
+  // 조합 출력 — done 사이클에 유효하다 (위 포트 주석 참조)
+  always_comb begin
+    for (int i = 0; i < D; i++) begin
+      row_flat[i*W +: W] = row_elem[i];
+    end
+  end
+  assign sat_count = row_sat_n + (berr_sat ? 32'd1 : 32'd0);
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
@@ -168,8 +182,6 @@ module update_unit #(
       err_r     <= '0;
       s_row_r   <= '0;
       k_r       <= '0;
-      row_flat  <= '0;
-      sat_count <= '0;
       cycles    <= '0;
     end else begin
       state <= state_n;
@@ -187,14 +199,6 @@ module update_unit #(
             s_row_r <= s_row_flat;
             k_r     <= k_flat;
           end
-        end
-
-        ST_CAP: begin
-          for (int i = 0; i < D; i++) begin
-            row_flat[i*W +: W] <= row_elem[i];
-          end
-          // 골든과 같은 셈: berr 재양자화 1회 + 행 재양자화 D회
-          sat_count <= row_sat_n + (berr_sat ? 32'd1 : 32'd0);
         end
 
         default: ;
