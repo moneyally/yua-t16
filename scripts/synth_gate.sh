@@ -31,7 +31,8 @@
 #                         시간 초과는 STAGE 2 와 같은 WARN 규칙을 따른다.
 #   STAGE 2 (synth)     : 전 모듈, 모듈당 SYNTH_TIMEOUT(기본 240s).
 #                         에러는 **게이트 실패**.
-#                         시간 초과는 **WARN 으로 표시하고 목록에 남긴다** —
+#                         시간 초과와 **OOM kill(abc 가 메모리로 죽는 것)** 은
+#                         **WARN 으로 표시하고 목록에 남긴다** —
 #                         "느려서 못 끝냄"은 "합성 불가"가 아니기 때문이다.
 #                         (예: mxu_bf16_16x16 은 FP32 가산기 256개라 20분+.)
 #                         --strict 를 주면 시간 초과도 실패로 친다.
@@ -163,7 +164,7 @@ if [ "$STAGE1_ONLY" -eq 1 ]; then
 fi
 
 # --- STAGE 2: full synth (전 모듈, 모듈당 타임아웃) --------------------------
-rm -f "$BUILD/.fail" "$BUILD/.timeout" "$BUILD/.zero"
+rm -f "$BUILD/.fail" "$BUILD/.timeout" "$BUILD/.zero" "$BUILD/.oom"
 echo ""
 echo "--- STAGE 2: synth -top (전 모듈, 모듈당 ${SYNTH_TIMEOUT}s, 병렬 ${JOBS}) ---"
 printf '%s\n' "${MODULES[@]}" | xargs -P "$JOBS" -I{} bash -c '
@@ -177,6 +178,12 @@ printf '%s\n' "${MODULES[@]}" | xargs -P "$JOBS" -I{} bash -c '
   if [ "$rc" -eq 124 ]; then
     printf "  TIMEOUT %-24s >%ss\n" "$m" "$TMO"
     echo "$m" >> "$BUILD/.timeout"
+  elif [ "$rc" -eq 137 ] || [ "$rc" -eq 139 ] || grep -q "bad_alloc\|ABC: Killed" "$log" 2>/dev/null; then
+    # rc 137 = SIGKILL (OOM killer), 139 = SIGSEGV, "ABC: Killed" = abc 가 OOM 으로 죽음.
+    # 자원 한계이지 합성 실패가 아니다. TIMEOUT 과 같은 등급으로 다룬다.
+    # 병렬(JOBS)을 줄이면 대개 통과한다.
+    printf "  OOMKILL %-24s %-8s abc/yosys 가 메모리로 죽었다 (rc=%s)\n" "$m" "$((t1-t0))s" "$rc"
+    echo "$m" >> "$BUILD/.oom"
   elif [ "$rc" -ne 0 ] || [ -z "$cells" ]; then
     printf "  FAIL    %-24s %s\n" "$m" "$(grep -m1 ERROR "$log" 2>/dev/null | cut -c1-70)"
     echo "$m" >> "$BUILD/.fail"
@@ -210,6 +217,13 @@ if [ "${#S2_KNOWN[@]}" -gt 0 ]; then
   echo "KNOWN INCOMPLETE (합성 단계, 실패로 치지 않음):"
   for m in "${S2_KNOWN[@]}"; do echo "  - $m: ${KNOWN_INCOMPLETE[$m]}"; done
 fi
+N_OOM=0
+if [ -f "$BUILD/.oom" ]; then
+  N_OOM=$(sort -u "$BUILD/.oom" | wc -l)
+  echo "WARN: 메모리 부족으로 죽은 모듈 ${N_OOM}개 — 합성 불가가 아니라 '측정 못 함'이다:"
+  sed 's/^/       /' "$BUILD/.oom"
+  echo "       JOBS=2 또는 JOBS=1 로 다시 돌려볼 것. 최종 판정은 Vivado."
+fi
 N_ZERO=0
 if [ -f "$BUILD/.zero" ]; then
   N_ZERO=$(sort -u "$BUILD/.zero" | wc -l)
@@ -221,12 +235,12 @@ if [ "$N_FAIL" -gt 0 ]; then
   echo "합성 실패 모듈:"; printf '       %s\n' "${S2_REAL[@]}"
   fail "STAGE 2 합성 실패 ${N_FAIL}개"
 fi
-if [ "$STRICT" -eq 1 ] && [ $(( N_TMO + E_TMO )) -gt 0 ]; then
-  fail "--strict: 시간 초과 $(( N_TMO + E_TMO ))개를 실패로 처리"
+if [ "$STRICT" -eq 1 ] && [ $(( N_TMO + E_TMO + N_OOM )) -gt 0 ]; then
+  fail "--strict: 미측정 $(( N_TMO + E_TMO + N_OOM ))개(시간 초과/OOM)를 실패로 처리"
 fi
 
 echo "=== PASS ==========================================================="
 echo "STAGE 1 elaborate $(( ${#MODULES[@]} - E_TMO - ${#E_KNOWN[@]} ))/${#MODULES[@]}  (시간 초과 ${E_TMO}, known-incomplete ${#E_KNOWN[@]})"
-echo "STAGE 2 synth     $(( ${#MODULES[@]} - N_TMO - N_ZERO - ${#S2_KNOWN[@]} ))/${#MODULES[@]}  (시간 초과 ${N_TMO}, 0셀 ${N_ZERO}, known-incomplete ${#S2_KNOWN[@]})"
+echo "STAGE 2 synth     $(( ${#MODULES[@]} - N_TMO - N_ZERO - N_OOM - ${#S2_KNOWN[@]} ))/${#MODULES[@]}  (시간 초과 ${N_TMO}, OOM ${N_OOM}, 0셀 ${N_ZERO}, known-incomplete ${#S2_KNOWN[@]})"
 echo "주의: 이것은 일일 게이트다. FPGA 합성·타이밍 판정은 Vivado 로만 한다."
 exit 0

@@ -21,6 +21,29 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+TB_DIRS = [Path(__file__).resolve().parent, Path(__file__).resolve().parent / "behavioral"]
+
+
+def _verilator_ok() -> bool:
+    """cocotb 2.x 는 verilator 5.022+ 의 VerilatedVpi API 를 요구한다."""
+    import shutil
+    import subprocess
+    if not shutil.which("verilator"):
+        return False
+    try:
+        out = subprocess.check_output(["verilator", "--version"], text=True).split()
+        maj, minor = out[1].split(".")[:2]
+        return (int(maj), int(minor)) >= (5, 22)
+    except Exception:
+        return False
+
+
+def _find_test_dir(module: str) -> Path:
+    """테스트 모듈이 tb/ 인지 tb/behavioral/ 인지 찾는다."""
+    for d in TB_DIRS:
+        if (d / f"{module}.py").exists():
+            return d
+    raise SystemExit(f"테스트 모듈을 찾을 수 없다: {module}.py (찾은 곳: {[str(d) for d in TB_DIRS]})")
 
 
 def main() -> int:
@@ -38,7 +61,9 @@ def main() -> int:
         print("소스 없음:", *missing, sep="\n  ", file=sys.stderr)
         return 2
 
-    sim = os.environ.get("SIM", "icarus")
+    # verilator 5.022+ 가 있으면 그쪽이 기본이다 (네이티브 SystemVerilog, sv2v 불필요).
+    # 없거나 구버전이면 icarus + sv2v 로 내려간다.
+    sim = os.environ.get("SIM") or ("verilator" if _verilator_ok() else "icarus")
     build_dir = ROOT / "build" / "tb" / toplevel
     build_dir.mkdir(parents=True, exist_ok=True)
 
@@ -83,7 +108,7 @@ def main() -> int:
     results = runner.test(
         hdl_toplevel=toplevel,
         test_module=module,
-        test_dir=str(Path(__file__).resolve().parent),
+        test_dir=str(_find_test_dir(module)),
         build_dir=str(build_dir),
         waves=True,
         # tb/results.xml (git 추적 파일) 을 덮어쓰지 않도록 build 아래로 뺀다.
