@@ -19,6 +19,22 @@
 `timescale 1ns/1ps
 `default_nettype none
 
+// -----------------------------------------------------------------------------
+// 범위 밖 · DR1 v2 검토 대상 (2026-09-11 결정)
+//
+// 이 모듈은 `real` 을 쓰지 않아 rtl/behavioral/ 로 옮기지 않았지만, 실질은
+// **손으로 만든 float 행동 모델**이다. fp32_add/fp32_mul 을 SV 함수로 구현한
+// FP32 가산기 256개를 한 사이클 always_ff 에 넣었다.
+//   - scripts/synth_gate.sh 에서 yosys 가 20분+ 걸린다 (기본 예산 초과 -> TIMEOUT).
+//     "합성 불가"가 아니라 **미측정**이다. 최종 판정은 Vivado.
+//   - docs/DESIGN.md 10절: BF16 은 v1 범위 밖 ("전부 v2 이후이거나 이 레포 범위 밖").
+//   - docs/DESIGN.md 8절 재사용 지도에 이 모듈은 없다. DR1 이 쓰는 것은
+//     mac_array (INT8 외적 누산) 이고 숫자 형식은 Q1.15 다.
+//
+// 이동하지 않는 이유: backward_engine 과 g3_int_top 이 실제로 인스턴스화하고 있고,
+// backward_engine 은 CLAUDE.md 2절이 격리 대상에서 명시적으로 제외한 모듈이다.
+// DR1 v2 (BF16) 를 착수할 때 이 구현을 그대로 쓸지 다시 판단한다.
+// -----------------------------------------------------------------------------
 module mxu_bf16_16x16 #(
   parameter int ROWS = 16,
   parameter int COLS = 16

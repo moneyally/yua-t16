@@ -2,6 +2,124 @@
 
 ---
 
+## 2026-09-11 (세션 3, 자율모드) — 금지 토큰 2등급 도입 + BUG-007
+
+**한 것**: 승인 (1)(2)(3) 반영. `===`/`!==`/`while` 을 SIM-ONLY 등급으로 금지 토큰에 추가하고 체커가 `` `ifdef COCOTB_SIM `` 중첩을 인식하게 했다. 추가하자마자 **남아 있던 X 가드 2건(BUG-007)** 이 드러나서 선제 수정. `mxu_bf16_16x16`·`backward_engine` 에 "범위 밖 · DR1 v2 검토" 주석. CLAUDE.md 규칙 1·4절 갱신.
+**안 된 것**: BUG-001 미수정(지시대로). 기존 `tb/` 36개 여전히 실행 못 함. `backward_engine`·`g3_int_top`·`gemm_int4_synth`·`mxu_bf16_16x16` 은 420s 예산 안에 yosys 가 못 끝냄(**미측정**).
+**실행한 검증 명령**: `bash scripts/synth_gate.sh` → **PASS (EXIT=0)** / `python3 scripts/check_banned_tokens.py rtl/*.sv rtl/*.v` → **clean (EXIT=0)** / `python3 -m pytest tests/ -q` → **3 failed, 247 passed, 5 xfailed**
+**다음 세션 첫 작업**: verilator 소스 빌드 + `scripts/setup_tools.sh` + 기존 tb 36개 중 복구 수 보고. **단, W1-3(린트)은 이것을 기다릴 필요가 없다** — 아래 참조.
+**사용자 결정 필요**: BUG-001 수정 3안 중 선택 (DESIGN.md 9절을 먼저 고쳐야 한다).
+
+---
+
+### 승인 4건 처리
+
+| # | 지시 | 결과 |
+|---|---|---|
+| 1·2 | `===`, `!==`, `while` 금지 토큰 추가. `ifdef COCOTB_SIM` 내부와 `tb/` 는 허용 | ✅ HARD / SIM-ONLY 2등급으로 나눠 `scripts/check_banned_tokens.py` 구현. `` `ifdef/`ifndef/`elsif/`else/`endif `` 중첩 추적. `tb/` 는 애초에 게이트 대상이 아님 |
+| 3 | `mxu_bf16_16x16`, `backward_engine` 이동 없이 느린 게이트 + "범위 밖·DR1 v2 검토" 주석 | ✅ 두 파일 module 선언 앞에 근거(DESIGN.md 10절·8절, CLAUDE.md 2절 제외 조항)까지 적어 넣음 |
+| 4 | 문서 3건은 정원님이 로컬 확인 후 처리 | ✅ 손대지 않음. pytest 에 빨간 채로 남아 있다 |
+
+### BUG-007 — 규칙을 추가하자마자 2건이 더 나왔다
+
+```
+$ python3 scripts/check_banned_tokens.py rtl/*.sv rtl/*.v
+rtl/act_sram.sv:33: [!==] if (a[k] !== 1'b0 && a[k] !== 1'b1)
+rtl/ctrl_fsm.sv:94: [===] end else if (core_done === 1'b1) begin
+EXIT=1
+```
+
+`ctrl_fsm.sv:94` 는 `core_done_seen` 캡처다. 조건이 상수 0 으로 접히면 **GEMM FSM 이 `ST_WAIT` 에 영영 갇힌다.**
+
+측정해 보니 **이번엔 피해가 없었다**:
+
+| 모듈 | 가드 있음 | 가드 제거 | 판정 |
+|---|---|---|---|
+| `ctrl_fsm` | 499 | 499 | 동일 |
+| `act_sram` | 99,294 | 99,294 | 동일 |
+
+`wgt_sram` 은 사라졌는데 `act_sram` 은 멀쩡했던 이유가 여기 있다. **같은 X 가드라도 접히는 방향이 코드 모양에 따라 달랐다** — `wgt_sram` 은 "X면 쓰지 마라"(→ 항상 쓰지 마라, 메모리 소멸), `act_sram` 은 "X면 invalid"(→ 항상 valid, 무해).
+
+**도구가 어느 쪽으로 접을지에 기대는 코드다.** yosys 가 무해했다고 Vivado 도 그러리라는 보장은 없다(**미검증**). 그래서 피해가 없어도 `` `ifdef COCOTB_SIM `` 으로 굳혔다. 수정 후 셀 수 동일(499 / 99,294) 확인.
+
+### 게이트 재실행
+
+```
+--- STAGE 2: synth -top (전 모듈, 모듈당 420s, 병렬 4) ---
+  ok      ctrl_fsm                 0s       cells(design total)=499
+  ok      cdc_fifo                 0s       cells(design total)=1167
+  ok      desc_fsm_v2              4s       cells(design total)=2786
+  ok      dma_bridge               1s       cells(design total)=880
+  ok      desc_queue               19s      cells(design total)=66030
+  ok      act_sram                 46s      cells(design total)=99294
+  ok      g3_desc_fsm              3s       cells(design total)=2897
+  ok      g2_ctrl_top              249s     cells(design total)=657868
+  ok      g2_protob_top            250s     cells(design total)=657773
+  ok      gemm_int4_fpga           101s     cells(design total)=50576
+  ok      gemm_core                146s     cells(design total)=429672
+  TIMEOUT backward_engine          >420s
+  ok      gemm_stub                0s       cells(design total)=203
+  ok      gemm_int4_sky130         54s      cells(design total)=43882
+  TIMEOUT g3_int_top               >420s
+  ok      irq_ctrl                 1s       cells(design total)=549
+  ok      mac_array                1s       cells(design total)=196352
+  ok      mac_pe                   0s       cells(design total)=730
+  ok      gemm_wb_wrapper          76s      cells(design total)=71263
+  ok      oom_guard                1s       cells(design total)=3752
+  ok      pcie_ep_versal           0s       cells(design total)=4
+  ok      reg_top                  9s       cells(design total)=7250
+  ok      reset_seq                0s       cells(design total)=52
+  ok      scale_fabric_ctrl        0s       cells(design total)=62
+  ok      trace_ring               41s      cells(design total)=143610
+  ok      gemm_top                 149s     cells(design total)=430402
+  ok      vpu_lut                  1s       cells(design total)=1130
+  ok      wgt_sram                 49s      cells(design total)=99294
+  TIMEOUT gemm_int4_synth          >420s
+  ok      vpu_core_synth           337s     cells(design total)=117221
+  TIMEOUT mxu_bf16_16x16           >420s
+
+WARN: 시간 초과 4개 (>420s) — 합성 불가가 아니라 '측정 못 함'이다:
+       backward_engine
+       g3_int_top
+       gemm_int4_synth
+       mxu_bf16_16x16
+       SYNTH_TIMEOUT=1800 으로 다시 돌리거나 Vivado 로 판정할 것.
+=== PASS ===========================================================
+```
+
+STAGE 1 이 26/31 → **27/31** 로 개선됐다 (시간 초과 3 → 2).
+
+---
+
+### 짚을 것 — W1-3 은 verilator 소스 빌드를 기다릴 필요가 없다
+
+다음 세션 1순위로 verilator 소스 빌드를 주셨는데, **W1-3(린트 기록)은 지금 있는 Debian 5.020 으로 바로 된다.**
+
+```bash
+$ verilator --lint-only -Wall -Irtl rtl/mac_pe.sv; echo $?
+0
+```
+
+verilator 의 cocotb 2.x 비호환은 **시뮬레이션 실행** 경로에만 해당한다 (`VerilatedVpi::clearEvalNeeded` 등 VPI API). `--lint-only` 는 영향이 없다.
+
+즉 두 작업은 독립이다:
+- **W1-3 (린트 → `docs/LINT.md`)**: 지금 가능. 몇 분.
+- **verilator 소스 빌드**: 기존 `tb/` 36개를 되살리기 위한 것. 이쪽이 더 크고 더 중요하지만 PLAN 항목은 아니다.
+
+### 2주 종료 기준 대비 현황
+
+PLAN 0단계 종료 기준 3개 중:
+
+| 기준 | 상태 |
+|---|---|
+| `scripts/synth_gate.sh` 통과 | ✅ EXIT=0 |
+| `docs/BUGS.md` 에 파형 근거 항목 1개 이상 | ✅ BUG-001 (+ 5건 더) |
+| README 에 과장 문구 0 | ⬜ **W2-1. 유일하게 남은 것** |
+
+W1-1 ✅ / W1-2 ✅ / W1-3 ⬜ / W2-1 ⬜ / W2-2 ✅(조기 완료) / W2-3 ✅
+
+---
+
 ## 2026-09-10 (세션 2, 자율모드) — W1-1 완료 + W1-2 게이트 + W2-2 준비
 
 **한 것**: 승인 6건 전부 실행. `scripts/synth_gate.sh` (2단 게이트) 세워서 **통과**. W2-2 가설을 테스트로 만들어 **BUG-001 확정** (파형·사이클표 확보). 게이트가 추가로 합성 결함 5개를 잡아냈고 그중 4개 수정.

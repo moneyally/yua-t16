@@ -264,6 +264,51 @@ endfunction
 
 ---
 
+## BUG-007 — 남아 있던 X 비교 가드 2건 (2026-09-11, 피해 없음 · 선제 수정)
+
+**상태**: **수정 완료**. BUG-006 수정 후 금지 토큰에 `===`/`!==` 를 추가하자마자 드러났다.
+
+`scripts/check_banned_tokens.py` 에 `===`, `!==`, `while` 을 추가하고 돌리자:
+
+```
+$ python3 scripts/check_banned_tokens.py rtl/*.sv rtl/*.v
+rtl/act_sram.sv:33: [!==] if (a[k] !== 1'b0 && a[k] !== 1'b1)  <- `ifdef COCOTB_SIM 안으로 ...
+rtl/ctrl_fsm.sv:94: [===] end else if (core_done === 1'b1) begin  <- `ifdef COCOTB_SIM 안으로 ...
+EXIT=1
+```
+
+`ctrl_fsm.sv:94` 쪽이 특히 위험해 보였다. 이건 `core_done_seen` 캡처 로직이고,
+조건이 상수 0 으로 접히면 **GEMM FSM 이 `ST_WAIT` 에 영영 갇힌다.**
+
+### 측정 — 이번엔 피해가 없었다
+
+BUG-006 과 같은 방법으로 가드만 중립화하고 셀 수를 비교했다.
+
+| 모듈 | 현재 (가드 있음) | 가드 제거 | 판정 |
+|---|---|---|---|
+| `ctrl_fsm` | 499 | 499 | 동일 — yosys 가 무해한 쪽으로 접었다 |
+| `act_sram` | 99,294 | 99,294 | 동일 |
+
+`wgt_sram` 은 사라졌는데 `act_sram` 은 멀쩡했던 이유가 이것이다. 같은 X 가드라도
+**접히는 방향이 코드 모양에 따라 달랐다** — `wgt_sram` 은 "X면 쓰지 마라"(→ 항상 쓰지 마라),
+`act_sram` 은 "X면 invalid"(→ 항상 valid). 앞의 것은 메모리를 지우고 뒤의 것은 무해하다.
+
+**도구가 어느 쪽으로 접을지에 기대는 코드다.** yosys 가 무해했다고 Vivado 도 그러리라는
+보장이 없다 (**미검증**). 그래서 피해가 없어도 고쳤다.
+
+### 수정
+
+둘 다 X 검사를 `` `ifdef COCOTB_SIM `` 안으로 넣고, 합성 경로는 명시적으로 썼다.
+시뮬레이션 동작은 동일. 수정 후 셀 수도 동일(499 / 99,294)임을 확인했다.
+
+### 이 버그가 남긴 규칙
+
+`CLAUDE.md` 규칙 1 에 **SIM-ONLY 등급**을 신설했다 (2026-09-11 사용자 승인):
+`===`, `!==`, `while`, `initial` 로직은 합성 경로에서 금지, `` `ifdef COCOTB_SIM `` 안은 허용.
+`scripts/check_banned_tokens.py` 가 `ifdef` 중첩을 추적해서 이 예외를 인식한다.
+
+---
+
 ## BUG-004 / BUG-005 — `fault_code_r` 다중 드라이버 (2026-09-10 수정됨)
 
 **상태**: **수정 완료**. `scripts/synth_gate.sh` STAGE 1 이 처음 잡아냈다.

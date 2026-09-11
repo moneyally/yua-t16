@@ -16,7 +16,16 @@
 
 ## 1. 절대 규칙 (어기면 그 커밋은 되돌린다)
 
-1. **합성 가능성이 정답이다.** 모든 RTL 모듈은 `yosys -p "read_verilog -sv <files>; synth -top <module>"` 이 에러 없이 통과해야 한다. `real`, `$itor`, `$rtoi`, `$exp`, `$sqrt`, `#delay`, `initial` 로직(시뮬레이션 전용 `ifdef COCOTB_SIM` 제외)은 합성 대상 RTL에 금지한다.
+1. **합성 가능성이 정답이다.** 합성 대상 RTL(`rtl/*.sv`, `rtl/*.v` — `rtl/behavioral/` 제외)은 `bash scripts/synth_gate.sh` 가 0으로 끝나야 한다. 금지 토큰은 두 등급이다:
+
+   | 등급 | 토큰 | 예외 |
+   |---|---|---|
+   | **HARD** — 어디에 있든 금지 | `real`, `$itor`, `$rtoi`, `$exp`, `$sqrt`, `#delay` | 없음. 해당 모듈은 `rtl/behavioral/` 로 |
+   | **SIM-ONLY** — 합성 경로에서 금지 | `===`, `!==`, `while`, `initial` 로직 | `` `ifdef COCOTB_SIM `` 안은 허용. `tb/` 는 검사 대상 아님 |
+
+   SIM-ONLY 가 왜 금지인가: 시뮬레이션에서는 의미가 있지만 **합성에서는 조용히 다른 회로가 된다.** `===`/`!==` 는 합성기가 조건을 상수로 접고, 경계 없는 `while` 은 하드웨어가 아니다. 실제로 이것 때문에 `wgt_sram` 이 통째로 사라졌고(0 cells vs 99,294) `gemm_core` 로직 95%가 죽었다 — `docs/BUGS.md` BUG-003, BUG-006, BUG-007.
+
+   검사: `python3 scripts/check_banned_tokens.py rtl/*.sv rtl/*.v` (주석·문자열·`ifdef` 인식. `grep` 은 블록 주석을 못 거른다)
 2. **테스트는 RTL 바깥의 정답과 비교한다.** cocotb 테스트의 기대값은 `sim/golden/`의 numpy 모델에서 나와야 한다. RTL 내부 함수를 참조 모델로 쓰는 테스트는 테스트가 아니다. 새 테스트마다 "기대값의 출처"를 docstring 첫 줄에 적는다.
 3. **완료 주장에는 명령 출력이 붙는다.** "테스트 통과"라고 쓰지 않는다. 실행한 명령과 마지막 20줄 출력을 그대로 보고에 붙인다. 실행하지 못했으면 "실행 못 함"이라고 쓴다.
 4. **비용 0.** 클라우드, 유료 API, 유료 툴을 추가하지 않는다. 툴체인은 verilator, iverilog, yosys, cocotb, Vivado(무료 에디션 범위)로 한정한다. 새 의존성은 이유를 적고 사용자 승인 후에 추가한다.
@@ -44,7 +53,7 @@
   - "23 RTL modules"(실제 47 파일), "tb/ 9 testbenches 29 tests"(실제 36 파일 147 테스트), "docs/ 15 design documents"(`.gitignore` 가 `docs/` 를 무시해 추적 파일 0개였음 — 2026-09-10 수정).
   - "Custom LLM Inference Accelerator", "Full closed loop verified", "No mocks", "awaiting silicon" — 0절이 금지한 종류의 표현.
   - 이전 판의 "MPW ready", "training" 문구는 **현재 README 에 없다.** (`grep -niE "MPW|training" README.md` → 해당 없음). 위 목록으로 대체한다.
-- `done_pulse` 관련 미해결 버그 존재 (파형으로 확인 필요).
+- **`done_pulse` 버그 확정 — `docs/BUGS.md` BUG-001.** fault 난 디스크립터가 `DESC_DONE` 완료 IRQ 를 올린다 (`IRQ_PENDING=0x21`). 재현 테스트·사이클표·파형 있음. **미수정** — `docs/DESIGN.md` 9절(완료 신호 정의)을 먼저 고쳐야 한다.
 
 ## 3. 작업 방식
 
@@ -56,20 +65,27 @@
 ## 4. 검증 명령 모음
 
 ```bash
-# 합성 가능성 게이트 (모든 합성 대상 RTL)
-yosys -q -p "read_verilog -sv rtl/*.sv; hierarchy -check; synth" 2>&1 | tail -20
+# 합성 가능성 게이트 — 이것 하나가 정답이다. 0 이어야 한다.
+bash scripts/synth_gate.sh; echo $?
+#   기본 예산(모듈당 240s)으로는 g2_ctrl_top 이 시간 초과로 뜬다. 정상이다.
+#   전부 잡으려면: SYNTH_TIMEOUT=420 bash scripts/synth_gate.sh
+#   빠른 확인만:   bash scripts/synth_gate.sh --stage1
+#   일일 게이트는 sv2v -> yosys. **최종 합성 판정은 Vivado.**
+
+# 금지 토큰만 따로 (주석·문자열·ifdef 인식)
+python3 scripts/check_banned_tokens.py rtl/*.sv rtl/*.v; echo $?
 
 # 린트
 verilator --lint-only -Wall -Irtl rtl/<module>.sv
 
-# 합성 대상 RTL에 금지 토큰이 있는지
-grep -nE '\breal\b|\$itor|\$rtoi|\$exp\b|\$sqrt|#[0-9]' rtl/*.sv | grep -v '^\s*//' || echo "clean"
-
 # 호스트 스택 테스트
 python -m pytest tests/ -q
 
-# cocotb (예)
-cd tb && make SIM=verilator TOPLEVEL=<module> MODULE=tb_<module>
+# cocotb — tb/ 에 Makefile 이 없다. 러너를 쓴다.
+python3 tb/run_tb.py <toplevel> <module> [소스.sv ...]
+#   예: python3 tb/run_tb.py g2_ctrl_top tb_g2_ctrl_top_fault_irq $(ls rtl/*.sv)
+#   iverilog + sv2v 로 돌린다. Debian verilator 5.020 은 cocotb 2.x 와 비호환
+#   (VerilatedVpi API 없음). verilator 소스 빌드가 다음 세션 1순위.
 ```
 
 ## 5. 저녁 검증 체크리스트 (사용자용)

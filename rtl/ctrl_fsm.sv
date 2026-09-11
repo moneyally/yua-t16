@@ -91,9 +91,19 @@ module ctrl_fsm #(
       // ST_DISPATCH 상태에서 core_done=1이 이미 세팅될 수 있음
       if (state == ST_IDLE || state == ST_DISPATCH) begin
         core_done_seen <= 1'b0;
+      // `===` 는 시뮬레이션 전용 연산자다. 합성기는 조건을 상수로 접을 수 있고,
+      // 그 방향에 따라 core_done_seen 이 영영 세팅되지 않아 FSM 이 ST_WAIT 에
+      // 갇힐 수 있다. 측정해 보니 yosys 0.33 에서는 무해한 쪽으로 접혔지만
+      // (셀 수 499 로 동일) 도구에 기대는 코드는 두지 않는다. docs/BUGS.md BUG-007.
+`ifdef COCOTB_SIM
       end else if (core_done === 1'b1) begin
         core_done_seen <= 1'b1;
       end
+`else
+      end else if (core_done == 1'b1) begin
+        core_done_seen <= 1'b1;
+      end
+`endif
     end
   end
 

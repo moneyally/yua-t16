@@ -25,14 +25,20 @@ module act_sram #(
   // --------------------------------------------
   // X-safe address check (Icarus friendly)
   // --------------------------------------------
+  // X 주소 검사는 **시뮬레이션 전용**이다. `!==` 는 합성 가능한 연산자가 아니다.
+  // wgt_sram 에서 같은 종류의 가드가 메모리를 통째로 삭제했다 (docs/BUGS.md BUG-006).
+  // 여기서는 yosys 가 무해한 쪽(항상 valid)으로 접어서 피해가 없었지만
+  // (셀 수 99,294 로 동일) 도구 판단에 기대지 않고 명시한다. docs/BUGS.md BUG-007.
   function automatic logic addr_is_valid(input logic [AW-1:0] a);
     integer k;
     begin
       addr_is_valid = 1'b1;
+`ifdef COCOTB_SIM
       for (k = 0; k < AW; k = k + 1) begin
         if (a[k] !== 1'b0 && a[k] !== 1'b1)
           addr_is_valid = 1'b0;
       end
+`endif
     end
   endfunction
 
