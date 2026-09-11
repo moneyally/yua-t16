@@ -231,7 +231,7 @@ module g2_ctrl_top #(
   logic [31:0] fsm_Kt;
   logic fsm_fault_valid;
   logic [7:0] fsm_fault_code;
-  logic fsm_busy, fsm_done_pulse;
+  logic fsm_busy, fsm_done_pulse, fsm_done_ok, fsm_done_err;
 
   assign fsm_desc_valid = arb_valid;
   assign arb_ready      = fsm_desc_ready;
@@ -247,7 +247,8 @@ module g2_ctrl_top #(
     .core_done(gemm_done_pulse),
     .timeout_cycles(32'd100_000),
     .fault_valid(fsm_fault_valid), .fault_code(fsm_fault_code),
-    .busy(fsm_busy), .done_pulse(fsm_done_pulse)
+    .busy(fsm_busy), .done_pulse(fsm_done_pulse),
+    .done_ok(fsm_done_ok), .done_err(fsm_done_err)
   );
 
   // ===============================================================
@@ -372,7 +373,9 @@ module g2_ctrl_top #(
     end else if (!perf_freeze) begin
       if (gemm_busy) mxu_bcyc_r <= mxu_bcyc_r + 1'b1;
       if (gemm_done_pulse) tile_count_r <= tile_count_r + 1'b1;
-      if (fsm_done_pulse)  done_count_r <= done_count_r + 1'b1;
+      // desc_done_count 는 **성공 완료** 수다 (docs/DESIGN.md 5.1절).
+      // 실패는 TC0_FAULT_STATUS 와 트레이스 링으로 본다.
+      if (fsm_done_ok)     done_count_r <= done_count_r + 1'b1;
     end
   end
 
@@ -385,6 +388,8 @@ module g2_ctrl_top #(
   // ===============================================================
   logic oom_alloc_inc, oom_alloc_dec, oom_dma_inc, oom_dma_dec, oom_underflow;
   assign oom_alloc_inc = |doorbell_pulse & ~oom_admission_stop;
+  // 자원 회수는 **리타이어**(성공+실패)에 걸린다 (docs/DESIGN.md 5.1절 규칙 4).
+  // done_ok 만 쓰면 fault 트랜잭션마다 OOM 사용량이 누수된다.
   assign oom_alloc_dec = fsm_done_pulse;
   assign oom_dma_inc   = fsm_cmd_valid & fsm_cmd_ready & (fsm_cmd_opcode == 8'h02);
   assign oom_dma_dec   = gemm_done_pulse | (fsm_fault_valid & (fsm_cmd_opcode == 8'h02));
@@ -454,10 +459,15 @@ module g2_ctrl_top #(
   wire oom_emerg_edge = (oom_state == 2'd3) & (oom_state_d != 2'd3);
 
   logic [31:0] irq_sources;
+  // irq_sources[0] = IrqBit.DESC_DONE 는 **성공 완료**에만 걸린다 (fsm_done_ok).
+  // 예전에는 fsm_done_pulse(리타이어)였고, desc_fsm_v2 가 ST_FAULT -> ST_DONE 으로
+  // 가면서 fault 난 디스크립터도 완료 IRQ 를 올렸다 (IRQ_PENDING=0x21).
+  // docs/BUGS.md BUG-001, docs/DESIGN.md 5.1절 규칙 3.
+  // 실패는 irq_sources[5] = IrqBit.TC0_FAULT (fsm_fault_valid) 로 보고된다.
   assign irq_sources = {20'd0, trace_wrap_irq, 1'b0/*wdog*/, 1'b0/*ici*/,
                          1'b0/*hbm_uncorr*/, 1'b0/*hbm_corr*/, 1'b0/*tc1*/,
                          fsm_fault_valid, oom_emerg_edge, oom_press_edge,
-                         1'b0/*dma_err*/, 1'b0/*dma_done*/, fsm_done_pulse};
+                         1'b0/*dma_err*/, 1'b0/*dma_done*/, fsm_done_ok};
 
   logic [31:0] irq_mask_out;
   logic msix_req;

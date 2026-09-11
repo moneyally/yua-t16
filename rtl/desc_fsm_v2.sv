@@ -63,9 +63,17 @@ module desc_fsm_v2 #(
   //   0x03 = timeout
   //   0x04 = reserved
 
-  // Status
+  // Status — 완료 신호 계약: docs/DESIGN.md 5.1절
+  //   done_ok    : 성공 완료. 정확히 1사이클. **완료 IRQ 는 이것에만 걸린다.**
+  //   done_err   : 실패 종료. 정확히 1사이클.
+  //   done_pulse : 리타이어 (= done_ok | done_err). 자원 회수(OOM 감소)는 이것에 걸린다.
+  // 한 트랜잭션은 done_ok 와 done_err 중 정확히 하나만 낸다.
+  // 예전에는 done_pulse 하나뿐이어서 fault 난 디스크립터도 완료 IRQ 를 올렸다
+  // (docs/BUGS.md BUG-001).
   output logic        busy,
-  output logic        done_pulse
+  output logic        done_pulse,
+  output logic        done_ok,
+  output logic        done_err
 );
 
   // ---------------------------------------------------------------
@@ -158,6 +166,22 @@ module desc_fsm_v2 #(
   function automatic logic opcode_valid(input logic [7:0] op);
     opcode_valid = (op == 8'h01) || (op == 8'h02) || (op == 8'h03) || (op == 8'h04);
   endfunction
+
+  // ---------------------------------------------------------------
+  // ST_DONE 진입 경로 구분 (docs/DESIGN.md 5.1절, docs/BUGS.md BUG-001)
+  // ST_FAULT 를 거쳐 들어왔는지 기억한다. ST_DONE 자체는 두 경로를 구분할 수 없다.
+  // ---------------------------------------------------------------
+  logic came_from_fault;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      came_from_fault <= 1'b0;
+    end else if (state == ST_IDLE) begin
+      came_from_fault <= 1'b0;          // 새 트랜잭션 시작 시 클리어
+    end else if (state == ST_FAULT) begin
+      came_from_fault <= 1'b1;
+    end
+  end
 
   // ---------------------------------------------------------------
   // core_done capture (same pattern as ctrl_fsm)
@@ -362,6 +386,14 @@ module desc_fsm_v2 #(
       end
     end
   end
+
+  // ---------------------------------------------------------------
+  // 완료 신호 분리 (docs/DESIGN.md 5.1절)
+  // done_pulse 는 ST_DONE 에서 1사이클 — 성공/실패 모두 여기를 지난다 (리타이어).
+  // 진입 경로로 갈라서 done_ok / done_err 를 만든다.
+  // ---------------------------------------------------------------
+  assign done_ok  = done_pulse && !came_from_fault;
+  assign done_err = done_pulse &&  came_from_fault;
 
 endmodule
 

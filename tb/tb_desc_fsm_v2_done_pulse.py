@@ -13,12 +13,15 @@ docs/AUDIT.md §4 가 남긴 발견 두 가지를 테스트로 바꾼 것이다:
      이 가설이 참이면 실패한 디스크립터에 DESC_DONE IRQ 가 뜬다.
      (상위 레벨 검증은 tb_g2_ctrl_top_fault_irq.py)
 
-검사 계약:
-  C1. 정상 디스크립터(NOP, GEMM): done_pulse 는 **정확히 1사이클**, 트랜잭션당 **정확히 1회**.
-  C2. fault 디스크립터(illegal opcode / CRC / timeout): done_pulse 가 나온다면 그것도
-      정확히 1사이클 1회여야 한다. 그리고 fault_valid 와의 관계를 기록한다.
-  C3. fault 디스크립터에서 done_pulse 가 **아예 나오지 않아야 한다** — 이것이 가설.
-      지금 실패하면 버그 확정, 통과하면 가설 기각. 어느 쪽이든 결과를 docs/BUGS.md 에 적는다.
+검사 계약 — docs/DESIGN.md 5.1절 완료 신호 계약 + 7절 불변조건 I6:
+  C1. 세 신호(done_ok / done_err / done_pulse) 모두 폭은 **정확히 1사이클**, 트랜잭션당 1회.
+  C2. 정상 디스크립터(NOP, GEMM): done_ok 만. done_err 는 0.
+  C3. fault 디스크립터(illegal opcode / CRC / timeout): done_err 만. **done_ok 는 0.**
+      done_pulse(리타이어)는 성공/실패 모두에서 난다 — 자원 회수가 걸려 있기 때문이다.
+  I6. 한 트랜잭션에 done_ok 와 done_err 중 **정확히 하나만** 발생한다.
+
+2026-09-11 이전에는 done_pulse 하나뿐이어서 C3 를 표현할 수 없었고, 그래서 fault 난
+디스크립터가 완료 IRQ 를 올렸다. 상위 레벨 확인은 tb_g2_ctrl_top_fault_irq.py.
 """
 import cocotb
 from cocotb.clock import Clock
@@ -108,11 +111,11 @@ async def observe(dut, cycles, feed_core_done=False):
     """cycles 사이클 동안 done_pulse / fault_valid 를 사이클 단위로 기록.
 
     returns dict:
-      pulses      : [(start_cycle, width), ...]  done_pulse 가 1이었던 연속 구간
-      total_high  : done_pulse 가 1이었던 총 사이클 수
+      pulses/ok_pulses/err_pulses : [(start_cycle, width), ...] 연속 구간
+      total_high / ok_high / err_high : 각 신호가 1이었던 총 사이클 수
       fault_cycle : fault_valid 가 처음 1이 된 사이클 (없으면 None)
     """
-    trace_done, trace_fault = [], []
+    trace_done, trace_fault, trace_ok, trace_err = [], [], [], []
     fed = False
     for c in range(cycles):
         await RisingEdge(dut.clk)
@@ -123,42 +126,62 @@ async def observe(dut, cycles, feed_core_done=False):
             await RisingEdge(dut.clk)
             dut.core_done.value = 0
             fed = True
-            trace_done.extend([0, 0])
-            trace_fault.extend([0, 0])
+            for t in (trace_done, trace_fault, trace_ok, trace_err):
+                t.extend([0, 0])
             continue
         trace_done.append(int(dut.done_pulse.value))
         trace_fault.append(int(dut.fault_valid.value))
+        trace_ok.append(int(dut.done_ok.value))
+        trace_err.append(int(dut.done_err.value))
 
-    pulses, start = [], None
-    for i, v in enumerate(trace_done):
-        if v and start is None:
-            start = i
-        elif not v and start is not None:
-            pulses.append((start, i - start))
-            start = None
-    if start is not None:
-        pulses.append((start, len(trace_done) - start))
+    def runs(tr):
+        out, start = [], None
+        for i, v in enumerate(tr):
+            if v and start is None:
+                start = i
+            elif not v and start is not None:
+                out.append((start, i - start)); start = None
+        if start is not None:
+            out.append((start, len(tr) - start))
+        return out
 
-    fault_cycle = next((i for i, v in enumerate(trace_fault) if v), None)
     return {
-        "pulses": pulses,
+        "pulses": runs(trace_done),
+        "ok_pulses": runs(trace_ok),
+        "err_pulses": runs(trace_err),
         "total_high": sum(trace_done),
-        "fault_cycle": fault_cycle,
-        "trace_done": trace_done,
+        "ok_high": sum(trace_ok),
+        "err_high": sum(trace_err),
+        "fault_cycle": next((i for i, v in enumerate(trace_fault) if v), None),
     }
 
 
-def assert_single_1cycle_pulse(dut, obs, label):
-    """C1/C2: done_pulse 는 1사이클 폭, 1회."""
-    assert len(obs["pulses"]) == 1, (
-        f"[{label}] done_pulse 는 트랜잭션당 정확히 1회여야 한다. "
-        f"관측: {len(obs['pulses'])}회 {obs['pulses']}"
+def assert_single_1cycle(obs, key, label):
+    """C1: 해당 신호가 트랜잭션당 정확히 1회, 폭 1사이클."""
+    runs = obs[key]
+    assert len(runs) == 1, (
+        f"[{label}] {key} 는 트랜잭션당 정확히 1회여야 한다. 관측: {len(runs)}회 {runs}"
     )
-    start, width = obs["pulses"][0]
+    start, width = runs[0]
     assert width == 1, (
-        f"[{label}] done_pulse 폭은 정확히 1사이클이어야 한다. "
-        f"관측: {width}사이클 (시작 사이클 {start})"
+        f"[{label}] {key} 폭은 정확히 1사이클이어야 한다. 관측: {width}사이클 (시작 {start})"
     )
+
+
+def assert_i6(obs, expect_ok, label):
+    """I6: done_ok 와 done_err 중 정확히 하나. done_pulse 는 리타이어로 항상 1회."""
+    assert_single_1cycle(obs, "pulses", f"{label}/retire")
+    if expect_ok:
+        assert_single_1cycle(obs, "ok_pulses", f"{label}/ok")
+        assert obs["err_high"] == 0, (
+            f"[{label}] 정상 트랜잭션이 done_err 를 냈다: {obs['err_pulses']}"
+        )
+    else:
+        assert_single_1cycle(obs, "err_pulses", f"{label}/err")
+        assert obs["ok_high"] == 0, (
+            f"[{label}] fault 트랜잭션이 done_ok(성공 완료)를 냈다: {obs['ok_pulses']}. "
+            "docs/DESIGN.md 5.1절 규칙 3 위반 — 완료 IRQ 가 실패에 뜬다 (docs/BUGS.md BUG-001)."
+        )
 
 
 @cocotb.test()
@@ -168,9 +191,9 @@ async def test_nop_done_pulse_is_exactly_one_cycle(dut):
     await reset_dut(dut)
     await send_descriptor(dut, make_descriptor(0x01))
     obs = await observe(dut, 40)
-    dut._log.info(f"NOP: pulses={obs['pulses']} total_high={obs['total_high']} fault={obs['fault_cycle']}")
+    dut._log.info(f"NOP: retire={obs['pulses']} ok={obs['ok_pulses']} err={obs['err_pulses']} fault={obs['fault_cycle']}")
     assert obs["fault_cycle"] is None, "NOP 은 fault 를 내면 안 된다"
-    assert_single_1cycle_pulse(dut, obs, "NOP")
+    assert_i6(obs, expect_ok=True, label="NOP")
 
 
 @cocotb.test()
@@ -180,66 +203,46 @@ async def test_gemm_done_pulse_is_exactly_one_cycle(dut):
     await reset_dut(dut)
     await send_descriptor(dut, make_descriptor(0x02))
     obs = await observe(dut, 60, feed_core_done=True)
-    dut._log.info(f"GEMM: pulses={obs['pulses']} total_high={obs['total_high']} fault={obs['fault_cycle']}")
+    dut._log.info(f"GEMM: retire={obs['pulses']} ok={obs['ok_pulses']} err={obs['err_pulses']} fault={obs['fault_cycle']}")
     assert obs["fault_cycle"] is None, "정상 GEMM 은 fault 를 내면 안 된다"
-    assert_single_1cycle_pulse(dut, obs, "GEMM")
+    assert_i6(obs, expect_ok=True, label="GEMM")
 
 
 @cocotb.test()
 async def test_illegal_opcode_must_not_produce_done_pulse(dut):
-    """C3 가설: illegal opcode 는 fault 만 내고 done_pulse 를 내면 안 된다.
-
-    실패하면 rtl/desc_fsm_v2.sv:331 (ST_FAULT -> ST_DONE) 가 버그로 확정된다.
-    """
+    """C3: illegal opcode -> done_err 만. done_ok 는 0 (완료 IRQ 가 뜨면 안 된다)."""
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
     await send_descriptor(dut, make_descriptor(0xFF))
     obs = await observe(dut, 40)
-    dut._log.info(f"ILLEGAL: pulses={obs['pulses']} total_high={obs['total_high']} fault={obs['fault_cycle']}")
-    assert obs["fault_cycle"] is not None, "illegal opcode 는 fault_valid 를 내야 한다"
-    if obs["pulses"]:
-        assert_single_1cycle_pulse(dut, obs, "ILLEGAL(width)")
-    assert obs["total_high"] == 0, (
-        "fault 난 디스크립터가 done_pulse 를 냈다. "
-        f"pulses={obs['pulses']}, fault_cycle={obs['fault_cycle']}. "
-        "g2_ctrl_top.sv:460 에서 irq_sources[0]=DESC_DONE=fsm_done_pulse 이므로 "
-        "실패한 디스크립터에 완료 IRQ 가 뜬다. docs/AUDIT.md §4 가설 확정."
-    )
+    dut._log.info(f"ILLEGAL: retire={obs['pulses']} ok={obs['ok_pulses']} err={obs['err_pulses']} fault={obs['fault_cycle']}")
+    assert obs["fault_cycle"] is not None, "fault 디스크립터는 fault_valid 를 내야 한다"
+    assert_i6(obs, expect_ok=False, label="ILLEGAL")
 
 
 @cocotb.test()
 async def test_crc_fail_must_not_produce_done_pulse(dut):
-    """C3 가설: CRC 불일치도 마찬가지."""
+    """C3: CRC 불일치도 같다."""
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
     await send_descriptor(dut, make_descriptor(0x02, valid_crc=False))
     obs = await observe(dut, 40)
-    dut._log.info(f"CRCFAIL: pulses={obs['pulses']} total_high={obs['total_high']} fault={obs['fault_cycle']}")
-    assert obs["fault_cycle"] is not None, "CRC 불일치는 fault_valid 를 내야 한다"
-    if obs["pulses"]:
-        assert_single_1cycle_pulse(dut, obs, "CRCFAIL(width)")
-    assert obs["total_high"] == 0, (
-        "CRC fault 디스크립터가 done_pulse 를 냈다. "
-        f"pulses={obs['pulses']}, fault_cycle={obs['fault_cycle']}"
-    )
+    dut._log.info(f"CRCFAIL: retire={obs['pulses']} ok={obs['ok_pulses']} err={obs['err_pulses']} fault={obs['fault_cycle']}")
+    assert obs["fault_cycle"] is not None, "fault 디스크립터는 fault_valid 를 내야 한다"
+    assert_i6(obs, expect_ok=False, label="CRCFAIL")
 
 
 @cocotb.test()
 async def test_timeout_must_not_produce_done_pulse(dut):
-    """C3 가설: timeout fault 도 마찬가지. core_done 을 끝까지 주지 않는다."""
+    """C3: timeout fault 도 같다. core_done 을 끝까지 주지 않는다."""
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
     dut.timeout_cycles.value = 30
     await send_descriptor(dut, make_descriptor(0x02))
     obs = await observe(dut, 80)
-    dut._log.info(f"TIMEOUT: pulses={obs['pulses']} total_high={obs['total_high']} fault={obs['fault_cycle']}")
-    assert obs["fault_cycle"] is not None, "timeout 은 fault_valid 를 내야 한다"
-    if obs["pulses"]:
-        assert_single_1cycle_pulse(dut, obs, "TIMEOUT(width)")
-    assert obs["total_high"] == 0, (
-        "timeout fault 디스크립터가 done_pulse 를 냈다. "
-        f"pulses={obs['pulses']}, fault_cycle={obs['fault_cycle']}"
-    )
+    dut._log.info(f"TIMEOUT: retire={obs['pulses']} ok={obs['ok_pulses']} err={obs['err_pulses']} fault={obs['fault_cycle']}")
+    assert obs["fault_cycle"] is not None, "fault 디스크립터는 fault_valid 를 내야 한다"
+    assert_i6(obs, expect_ok=False, label="TIMEOUT")
 
 
 @cocotb.test()
@@ -259,13 +262,13 @@ async def test_diag_fault_cycle_table(dut):
         except Exception:
             return None
 
-    dut._log.info("cyc | state | busy | fault_valid | fault_code | done_pulse")
-    dut._log.info("----+-------+------+-------------+------------+-----------")
+    dut._log.info("cyc | state | busy | fault_valid | fault_code | retire | ok | err")
+    dut._log.info("----+-------+------+-------------+------------+--------+----+----")
     for c in range(12):
         await RisingEdge(dut.clk)
         st = probe("state")
         dut._log.info(
-            "%3d | %5s | %4d | %11d | %#10x | %10d"
+            "%3d | %5s | %4d | %11d | %#10x | %6d | %2d | %3d"
             % (
                 c,
                 "?" if st is None else str(st),
@@ -273,5 +276,7 @@ async def test_diag_fault_cycle_table(dut):
                 int(dut.fault_valid.value),
                 int(dut.fault_code.value),
                 int(dut.done_pulse.value),
+                int(dut.done_ok.value),
+                int(dut.done_err.value),
             )
         )
