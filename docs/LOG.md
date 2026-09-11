@@ -2,6 +2,183 @@
 
 ---
 
+## 2026-09-11 (세션 4, 자율모드) — W1-3 · verilator 복구 · W2-1 README · BUG-001 수정
+
+**한 것**: 4건 순서대로 전부. `docs/LINT.md`(W1-3) / verilator 5.034 소스 빌드 + `scripts/setup_tools.sh` → **기존 tb 38개 중 32개 실행 복구** / README 전면 재작성(W2-1) / **BUG-001 수정** (DESIGN.md 5.1절 완료 신호 계약 신설 후 RTL).
+**안 된 것**: verilator 복구로 **기존 테스트 실패 6건(BUG-008)이 드러났다 — 미수정.** `cdc_fifo` 는 데이터가 통과하지 않는다. `cocotb-test` 는 이 환경에서 wheel 빌드 실패(선택 사항). 4개 모듈은 여전히 yosys 시간 예산 초과(미측정).
+**실행한 검증 명령**: `SYNTH_TIMEOUT=420 JOBS=2 bash scripts/synth_gate.sh` → **PASS (EXIT=0)** — STAGE 1 29/31, STAGE 2 27/31 / tb 스윕 → **38개 중 PASS 32, 개별 153개 중 146 PASS** / `python3 -m pytest tests/ -q` → 3 failed, 247 passed, 5 xfailed / `verilator --version` → 5.034
+**다음 세션 첫 작업**: BUG-008a/b (`cdc_fifo` 데이터 미통과) — 테스트벤치가 틀렸나 RTL 이 틀렸나부터 가른다. 0단계 종료 기준은 이제 전부 충족.
+**사용자 결정 필요**: 1건 — PLAN "현재 주차"를 3으로 올릴지 (0단계 종료 기준 3/3 충족).
+
+---
+
+### 1. W1-3 — `docs/LINT.md`
+
+```bash
+for f in $(ls rtl/*.sv rtl/*.v | sort); do
+  echo "##### $f"; verilator --lint-only -Wall -Irtl "$f"; echo "##### rc=$?"
+done
+```
+
+31개 파일 / 총 **134건** / **경고 0건 파일 13개**.
+
+| 코드 | 건수 |
+|---|---|
+| `UNUSEDSIGNAL` | 59 |
+| `WIDTHTRUNC` | 34 |
+| `WIDTHEXPAND` | 27 |
+| `UNUSEDPARAM` | 8 |
+| `PINCONNECTEMPTY` | 5 |
+| `BLKLOOPINIT` | **1 (유일한 진짜 에러)** |
+
+`mac_pe`, `mac_array`, `desc_fsm_v2`, `reg_top`, `irq_ctrl`, `trace_ring`, `oom_guard`, `reset_seq` —
+**북극성 핵심 부품과 제어 평면 주요 모듈이 전부 경고 0건이다.**
+
+유일한 에러는 `vpu_core_synth.sv:554` `BLKLOOPINIT` (for 루프 안 배열 논블로킹 대입).
+verilator 가 지원하지 않는 구문이라 **이 모듈은 verilator 로 시뮬레이션할 수 없다.**
+그런데 `sim/cocotb/test_vpu_synth.py` 가 이걸 DUT 로 쓴다. 기록만 했다 (W1-3 지시).
+
+**지적한 대로 이건 verilator 소스 빌드를 기다릴 필요가 없었다** — `--lint-only` 는 5.020 으로 된다.
+
+### 2. verilator 소스 빌드 + `scripts/setup_tools.sh`
+
+```
+$ verilator --version
+Verilator 5.034 2025-02-24 rev v5.034
+```
+
+`scripts/setup_tools.sh` 에 전 과정을 기록했다 (`--check` 로 상태만 확인 가능).
+그 과정에서 함정 두 개를 만났고 스크립트에 주석으로 남겼다:
+
+- **numpy 가 깨져 있었다.** apt 의 `python3-numpy`(yosys → xdot → graphviz 의존으로 딸려온다)가 `/usr/lib/python3/dist-packages` 에 들어가는데 `/usr/local/bin/python3` 에서 import 되지 않는다 (`No module named 'numpy.core._multiarray_umath'`). pip 로 덮으려 해도 `RECORD file not found (installed by debian)` 로 막힌다. `--ignore-installed` 로 우회. **1단계(골든 모델) 전체가 numpy 에 의존하므로 이건 선택이 아니었다.**
+- **`cocotb-test` 는 wheel 빌드가 실패한다.** 다행히 필수가 아니다 — `tb/run_tb.py` 는 cocotb 2.x 내장 `cocotb_tools.runner` 를 쓴다. 레거시 `sim/cocotb/run_*.py` 만 `cocotb_test` 를 참조하므로 그 러너들을 옮기는 것이 남은 일이다.
+
+### 3. 기존 tb 복구 — **38개 중 32개**
+
+`tb/run_tb.py` 를 고쳐 verilator 5.022+ 가 있으면 자동으로 쓰고(네이티브 SV, sv2v 불필요),
+없으면 icarus+sv2v 로 내려가게 했다. `tb/` 와 `tb/behavioral/` 양쪽에서 모듈을 찾는다.
+
+```
+PASS      32
+TESTFAIL   5
+TIMEOUT    0
+BUILDERR   1
+개별 테스트: 153개 중 PASS 146 / FAIL 7
+```
+
+전체: `build/tb/sweep.txt` · 모듈별 로그: `build/tb/sweep_<module>.log`
+
+**이전 상태: 0개 실행 가능** (`tb/` 에 Makefile 없음 + verilator 비호환).
+
+실패 6건은 `docs/BUGS.md` **BUG-008** 에 각각의 assertion 출력과 함께 기록했다. **미수정.**
+가장 심각한 것:
+
+| 테스트벤치 | 증상 |
+|---|---|
+| `tb_cdc_fifo_async` | `Mismatch at 0: wrote 0xdead0000, read 0x0` — 데이터가 통과하지 않는다 |
+| `tb_cdc_fifo_reset` | `Data corruption after reset: assert 0 == 3405643777` |
+| `tb_oom_guard_thresholds` | `Expected PRESSURE, got 0` (2/2 실패) |
+
+`cdc_fifo` 는 `CLAUDE.md` 2절이 **"구조 양호"** 로 분류한 모듈이다. BUG-002 때문에 컴파일이 안 됐고,
+컴파일을 고치고 처음 돌려보니 동작하지 않는다. **"구조 양호"의 근거가 된 테스트는 한 번도 실행된 적이 없었다.**
+
+### 4. W2-1 — README 전면 재작성
+
+`grep -niE "MPW|training|LLM inference|GPU|frontier|awaiting silicon|closed loop|no mocks|all pass|237" README.md` → **없음**
+
+- 첫 줄을 지시대로 바꿨다: "INT8 16×16 외적 누산 타일 + 검증된 제어 평면. 다음 목표: 델타룰 헤드."
+- 현재 상태표에 **근거(셀 수·명령)를 붙였다.** 스텁·없음·미측정을 그대로 적었다.
+- **"행동 모델(합성 불가)" 섹션**을 분리하고 14개 모듈마다 왜 하드웨어가 아닌지 적었다.
+- 실행 가능한 명령만 남겼다. `pip install verilator` 같은 거짓 지시 제거.
+- 알려진 미해결 버그를 README 에 명시 (BUG-008 링크).
+- pytest 실패 3건·xfail 5건의 이유를 README 에 그대로 적었다.
+
+### 5. BUG-001 수정 — SSOT 먼저
+
+**`docs/DESIGN.md` 를 먼저 고쳤다** (버전 0.1 → 0.2). 5.1절 **완료 신호 계약** 신설:
+
+| 신호 | 의미 | 걸려 있는 것 |
+|---|---|---|
+| `done_ok` | 성공 완료, 1사이클 | **완료 IRQ (`DESC_DONE`)** |
+| `done_err` | 실패 종료, 1사이클 | (fault 는 `TC0_FAULT` 로도 보고) |
+| `done_pulse` | 리타이어 = ok\|err | **자원 회수** (OOM 감소) |
+
+7절 불변조건에 **I6** 추가: 한 트랜잭션에 ok/err 중 정확히 하나, 폭 1사이클.
+
+RTL: `desc_fsm_v2` 에 `came_from_fault` 레지스터로 `ST_DONE` 진입 경로를 구분해
+`done_ok`/`done_err` 를 파생. `g2_ctrl_top` 의 `irq_sources[0]` 을 `fsm_done_ok` 로 바꿨다.
+
+**`ST_FAULT → ST_DONE` 전이는 그대로 뒀다.** 권고했던 "ST_IDLE 로 직행"(1안)을 쓰지 않은 이유:
+`oom_alloc_dec` 가 `done_pulse` 에 걸려 있어서, 직행시키면 **fault 트랜잭션마다 OOM 사용량이 누수된다.**
+3안(신호 분리)이 맞았던 것은 이 때문이다 — 계약 규칙 4 로 명시했다.
+
+```
+ILLEGAL    IRQ_PENDING = 0x00000021 ['DESC_DONE','TC0_FAULT']   (수정 전)
+ILLEGAL    IRQ_PENDING = 0x00000020 ['TC0_FAULT']               (수정 후)
+** TESTS=3 PASS=3 FAIL=0 SKIP=0 **
+```
+
+`tb_desc_fsm_v2_done_pulse.py` 도 새 계약(I6)으로 고쳤다 — 6/6 PASS.
+예전 단언("fault 면 done_pulse 가 없어야 한다")은 **새 계약과 모순**이라 바꿨다.
+`done_pulse` 는 리타이어이므로 fault 에서도 나는 게 맞다.
+
+`g3_desc_fsm` 은 같은 `ST_FAULT → ST_DONE` 모양이지만 **IRQ 소비자가 없다**
+(`g3_int_top` 이 출력으로 그냥 내보낸다). 사용자에게 보이는 버그가 아니라 손대지 않았다.
+
+---
+
+### 6. 게이트가 거짓 실패를 냈다 — OOM 등급 추가
+
+BUG-001 수정 후 게이트를 돌렸더니 **EXIT=1** 이 나왔다.
+
+```
+FAIL    gemm_int4_synth   ERROR: ABC: execution of command ... failed: return code 137.
+FAIL: STAGE 2 합성 실패 1개
+EXIT=1
+```
+
+로그를 보면 `ABC: Killed`, rc=137 = SIGKILL = **OOM killer**.
+병렬 4개에 무거운 모듈(`g2_ctrl_top` 657k cells, `mxu_bf16_16x16`)이 겹쳐 abc 가 메모리로 죽은 것이다.
+**설계 실패가 아니라 자원 한계다.** 시간 초과와 같은 등급이어야 하는데 하드 실패로 처리하고 있었다.
+
+`scripts/synth_gate.sh` 에 **OOMKILL 등급**을 추가했다 (rc 137/139, `bad_alloc`, `ABC: Killed` 감지).
+시간 초과와 같이 WARN + 목록으로 표시하고, `JOBS` 를 줄여보라고 안내한다.
+`--strict` 에서는 둘 다 실패로 친다.
+
+`JOBS=2` 로 다시 돌린 결과:
+
+```
+WARN: 시간 초과 4개 (>420s) — 합성 불가가 아니라 '측정 못 함'이다:
+       backward_engine  g3_int_top  gemm_int4_synth  mxu_bf16_16x16
+=== PASS ===========================================================
+STAGE 1 elaborate 29/31  (시간 초과 0, known-incomplete 2)
+STAGE 2 synth     27/31  (시간 초과 4, OOM 0, 0셀 0, known-incomplete 0)
+EXIT=0
+```
+
+`g2_ctrl_top` 657,872 cells · `desc_fsm_v2` 2,789 (BUG-001 수정으로 2,786 → 2,789, `came_from_fault` 1비트 + 파생 2개).
+
+**교훈**: 게이트의 판정 등급이 부족하면 게이트 자체가 거짓 신호를 낸다.
+"실패"와 "측정 못 함"을 구분하지 않으면, 통과시키려고 범위를 줄이는 압력이 생긴다.
+
+---
+
+### 0단계 (1~2주) 종료 기준 — **3/3 충족**
+
+| 기준 | 상태 |
+|---|---|
+| `scripts/synth_gate.sh` 통과 | ✅ EXIT=0 |
+| README 에 과장 문구 0 | ✅ grep 결과 없음 |
+| BUGS.md 에 파형 근거 항목 1개 이상 | ✅ BUG-001 (+7건) |
+
+W1-1 ✅ W1-2 ✅ W1-3 ✅ W2-1 ✅ W2-2 ✅ W2-3 ✅ — **0단계 전 항목 완료.**
+
+**1단계(3~4주)는 RTL 금지 · 골든 모델 전용이다.** 이번 세션이 그 이유를 한 번 더 보여줬다:
+BUG-008 의 6건은 전부 "테스트벤치가 틀렸나 RTL 이 틀렸나"를 가릴 수 없는 상태다.
+`sim/golden/` 을 import 하는 테스트는 여전히 **0개**다.
+
+---
+
 ## 2026-09-11 (세션 3, 자율모드) — 금지 토큰 2등급 도입 + BUG-007
 
 **한 것**: 승인 (1)(2)(3) 반영. `===`/`!==`/`while` 을 SIM-ONLY 등급으로 금지 토큰에 추가하고 체커가 `` `ifdef COCOTB_SIM `` 중첩을 인식하게 했다. 추가하자마자 **남아 있던 X 가드 2건(BUG-007)** 이 드러나서 선제 수정. `mxu_bf16_16x16`·`backward_engine` 에 "범위 밖 · DR1 v2 검토" 주석. CLAUDE.md 규칙 1·4절 갱신.

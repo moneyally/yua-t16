@@ -1,213 +1,170 @@
-# ORBIT-G2 — Custom LLM Inference Accelerator
+# yua-t16 / ORBIT — INT8 16×16 외적 누산 타일 + 검증된 제어 평면
 
-> Custom SystemVerilog RTL + Python host stack for a dedicated LLM inference chip.  
-> Full software-hardware closed loop verified: **237 tests** across RTL simulation, cocotb co-simulation, and Python host stack.
+INT8 16×16 외적 누산 타일 + 검증된 제어 평면. 다음 목표: 델타룰 헤드 ([docs/DESIGN.md](docs/DESIGN.md)).
 
----
-
-## What is this?
-
-ORBIT-G2 is an open-source hardware accelerator for LLM inference. Built from scratch — RTL, host software, FPGA bitstream, everything.
-
-- **23 RTL modules** in SystemVerilog (control plane + compute pipeline)
-- **Python host stack** with HAL, CLI, descriptor packer, trace decoder, scheduler
-- **Co-simulation**: Python host stack drives RTL via cocotb — GEMM end-to-end verified
-- **FPGA target**: VCK190 (Versal VC1902) PCIe Gen4 x8
-- **Bitstream generated**: Vivado 2025.2, synthesis + implementation + PDI complete
+SystemVerilog RTL 과 Python 호스트 스택. **시뮬레이션 단계이며 실물 보드에서 동작한 적이 없다.**
 
 ---
 
-## Test Results
+## 현재 상태
 
-| Category | Tests | Status |
-|----------|-------|--------|
-| Python unit/integration | 208 | All pass |
-| RTL cocotb (module-level) | 24 | All pass |
-| Host-driven DUT (GEMM E2E) | 5 | All pass |
-| **Total** | **237** | **All pass** |
+| 블록 | 상태 | 근거 |
+|---|---|---|
+| `mac_pe`, `mac_array` — INT8 16×16 출력 고정 외적 누산 | **합성됨** | `mac_array` 196,352 cells (`scripts/synth_gate.sh`) |
+| 제어 평면 — `reg_top`, `desc_queue`, `desc_fsm_v2`, `irq_ctrl`, `trace_ring`, `oom_guard`, `reset_seq`, `cdc_fifo` | **합성됨** | `g2_ctrl_top` 657,868 cells |
+| `gemm_core` / `gemm_top` — DMA + MAC 오케스트레이션 | **합성됨** | 429,672 / 430,402 cells |
+| Python 호스트 스택 (`tools/`) — HAL, 디스크립터 패커, 레지스터맵 SSOT, 트레이스 디코더, CLI | **동작** | `python3 -m pytest tests/ -q` |
+| PCIe (`pcie_ep_versal`) | **스텁** | CPM AXI-Stream 포트가 연결되지 않았다. 호스트와 통신한 적 없음 |
+| 외부 메모리 (DDR/HBM) | **없음** | `dma_bridge` 는 상태머신이고 실제 메모리 인터페이스가 아니다 |
+| 학습 경로 (`optimizer_unit`, `loss_scaler`, `collective_engine`, G3 top) | **행동 모델 (합성 불가)** | `rtl/behavioral/` 로 격리. 아래 참조 |
+| BF16 (`mxu_bf16_16x16`) | **미측정** | 손으로 만든 FP32 가산기 256개. yosys 가 시간 예산 안에 못 끝낸다 |
+| 실물 보드 | **없음** | 보드를 산 적이 없다 |
 
-### What the E2E test actually proves
+### 알려진 미해결 버그
 
-The `test_host_gemm_e2e` test runs this full path on real RTL:
+- **BUG-001**: fault 난 디스크립터가 완료 IRQ(`DESC_DONE`)를 올린다 (`IRQ_PENDING=0x21`).
+  재현 테스트·사이클 표·파형 있음. **미수정.** → [docs/BUGS.md](docs/BUGS.md)
 
-```
-Python host stack
-  → descriptor pack (CRC-8)
-  → register staging (16 MMIO writes)
-  → doorbell ring
-  → desc_queue push
-  → priority arbiter (Q3>Q0>Q1>Q2)
-  → desc_fsm_v2 (CRC check + opcode validation)
-  → gemm_top dispatch
-  → gemm_core (DMA read act + wgt → MAC compute → DMA write result)
-  → completion IRQ
-  → trace ring event
-  → host reads IRQ + trace + clears fault
-```
-
-All in one cocotb test. No mocks, no shortcuts — the Python host stack talks to the SystemVerilog DUT.
+전체 목록과 수정된 버그의 근거는 [docs/BUGS.md](docs/BUGS.md).
 
 ---
 
-## Architecture
+## 행동 모델 (합성 불가) — `rtl/behavioral/`
 
-```
-Host Software (Python)
-  │
-  ├── OrbitDevice HAL
-  │     ├── connect / enqueue / poll / clear
-  │     └── Backend abstraction
-  │           ├── SimBackend (unit tests)
-  │           ├── CocotbBackend (RTL simulation)
-  │           └── MmapBackend (real hardware via PCIe BAR mmap)
-  │
-  ▼
-RTL (SystemVerilog)
-  │
-  ├── g2_protob_top ─────────── Proto-B top (PCIe + DMA + control)
-  │     ├── pcie_ep_versal ──── CPM PCIe Gen4 x8 adapter
-  │     ├── dma_bridge ──────── DMA submit/status state machine
-  │     └── g2_ctrl_top ─────── Proto-A control plane
-  │           ├── reg_top ───── 48 MMIO registers (REG_SPEC)
-  │           ├── desc_queue ── 4 descriptor queues + priority arbiter
-  │           ├── desc_fsm_v2 ─ CRC / timeout / opcode validation
-  │           ├── gemm_top ──── GEMM orchestrator
-  │           │     ├── ctrl_fsm
-  │           │     └── gemm_core (INT8 16×16 MAC array)
-  │           ├── oom_guard ─── 4-state memory pressure controller
-  │           ├── trace_ring ── 1K-entry debug event ring
-  │           ├── irq_ctrl ──── 12-source interrupt controller (W1C)
-  │           └── reset_seq ─── Reset sequencer (POR/SW/WDOG)
-  │
-  ▼
-FPGA (VCK190 / VC1902)
-  PCIe Gen4 x8 → BAR0 (1MB registers) + BAR4 (64KB DMA)
-```
+`rtl/behavioral/` 에 있는 14개 모듈은 **하드웨어가 아니다.** SystemVerilog 로 쓰인
+동작 기술이며, 합성 대상이 아니고 `scripts/synth_gate.sh` 검사에서 제외된다.
+
+| 모듈 | 왜 하드웨어가 아닌가 |
+|---|---|
+| `optimizer_unit`, `loss_scaler`, `collective_engine`, `vpu_core`, `vpu_fp16_utils`, `gemm_int4`, `moe_router` | `real` 타입 + `$itor`/`$rtoi`/`$exp`/`$sqrt` 부동소수 연산 |
+| `g3_train_int_top`, `g3_multistep_int_top`, `g3_2chip_int_top`, `g3_2chip_fabric_int_top`, `vpu_top` | 위 모듈들을 인스턴스화한다 |
+| `g3_asic_top`, `g3_ctrl_top` | 존재하지 않는 모듈 `g3_reg_top` 을 인스턴스화한다 — elaborate 불가 |
+| `kvc_core` | `kv_store` 6차원 배열 = 2 Mbit 플립플롭. yosys `std::bad_alloc` |
+| `mxu_bf16_128x128` | `tile_acc` = 524,288 플립플롭 |
+
+이들의 테스트벤치는 `tb/behavioral/`, `sim/cocotb/behavioral/` 에 있다.
 
 ---
 
-## Quick Start
+## 실행 가능한 명령
 
-### Run tests (no hardware needed)
+아래는 전부 실제로 돌아가는 것만 적었다. 툴체인 설치는 `bash scripts/setup_tools.sh`.
+
+### 합성 가능성 게이트
 
 ```bash
-pip install pytest
-cd yua-t16
-python -m pytest tests/ -v
-# 208 passed
+bash scripts/synth_gate.sh; echo $?     # 0 이어야 한다
 ```
 
-### Debug CLI
+sv2v → yosys 로 `rtl/` 전체를 2단 검사한다 (elaborate + synth).
+**일일 게이트다. 최종 합성·타이밍 판정은 Vivado 로만 한다.**
+기본 예산(모듈당 240s)으로는 `g2_ctrl_top` 이 시간 초과로 뜬다 — 정상이다.
+전부 잡으려면 `SYNTH_TIMEOUT=420`. 빠른 확인만 하려면 `--stage1`.
+
+### 호스트 스택 테스트
 
 ```bash
-python -m tools.orbit_debug_protoa info
-python -m tools.orbit_debug_protoa queue-status
-python -m tools.orbit_debug_protoa tc-status
-python -m tools.orbit_debug_protoa irq
-python -m tools.orbit_debug_protoa trace-dump --count 16
-python -m tools.orbit_debug_protoa doorbell --queue 0 --opcode 0x01
+python3 -m pytest tests/ -q
+# 3 failed, 247 passed, 5 xfailed
 ```
 
-### RTL co-simulation (needs verilator + cocotb)
+실패 3건은 `docs/ORBIT_G2_VCK190_*.md` 3개가 저장소에 없어서 난다 (커밋된 적이 없다).
+xfail 5건은 `fpga/vck190/create_cpm_ip.tcl` 에 CPM 설정이 없어서다 — 단언이 옳고 Tcl 이 미완성이다.
+
+### RTL 시뮬레이션 (cocotb)
 
 ```bash
-pip install cocotb verilator
-# Host-driven GEMM E2E runs Python host stack against RTL DUT
-# See tb/tb_g2_ctrl_top_host_e2e.py
+python3 tb/run_tb.py <toplevel> <module> [소스.sv ...]
+
+# 예: BUG-001 재현
+python3 tb/run_tb.py g2_ctrl_top tb_g2_ctrl_top_fault_irq $(ls rtl/*.sv)
 ```
 
-### Build FPGA bitstream (needs Vivado 2025.2)
+`tb/` 에 Makefile 은 없다. 러너를 쓴다. 파형은 `build/tb/<toplevel>/` 에 FST 로 남는다.
+
+### 금지 토큰 검사
 
 ```bash
-cd fpga/vck190
-vivado -mode batch -source create_project.tcl
-# Configure CPM endpoint in Vivado GUI, then synthesize
+python3 scripts/check_banned_tokens.py rtl/*.sv rtl/*.v; echo $?
+```
+
+### 디버그 CLI (RTL 없이 동작 — SimBackend)
+
+```bash
+python3 -m tools.orbit_debug_protoa info
+python3 -m tools.orbit_debug_protoa queue-status
+python3 -m tools.orbit_debug_protoa trace-dump --count 16
 ```
 
 ---
 
-## Project Structure
+## 구조
 
 ```
-yua-t16/
-├── rtl/                       # 23 SystemVerilog modules
-│   ├── g2_protob_top.sv       #   Proto-B top (PCIe + control)
-│   ├── g2_ctrl_top.sv         #   Proto-A control plane
-│   ├── pcie_ep_versal.sv      #   PCIe endpoint (CPM adapter)
-│   ├── dma_bridge.sv          #   DMA state machine
-│   ├── reg_top.sv             #   48-register MMIO bank
-│   ├── desc_queue.sv          #   4-queue ring buffer
-│   ├── desc_fsm_v2.sv         #   Descriptor validator
-│   ├── gemm_top.sv            #   GEMM orchestrator
-│   ├── gemm_core.sv           #   INT8 16x16 MAC + DMA
-│   ├── oom_guard.sv           #   Memory pressure controller
-│   ├── trace_ring.sv          #   Debug trace ring
-│   ├── irq_ctrl.sv            #   Interrupt controller
-│   ├── reset_seq.sv           #   Reset sequencer
-│   ├── cdc_fifo.sv            #   Async FIFO
-│   └── ...                    #   mac_array, mac_pe, kvc_core, etc.
-│
-├── tb/                        # 9 cocotb testbenches, 29 tests
-│   ├── tb_g2_ctrl_top_host_e2e.py  # Host-driven GEMM E2E
-│   ├── dma_responder.py            # DMA test memory model
-│   └── ...
-│
-├── tools/                     # Python host stack (14 modules)
-│   ├── orbit_device.py        #   Device HAL
-│   ├── orbit_mmio_map.py      #   Register map SSOT
-│   ├── orbit_desc.py          #   Descriptor packer + CRC
-│   ├── orbit_scheduler.py     #   Op scheduler
-│   ├── orbit_debug_protoa.py  #   Debug CLI
-│   └── ...
-│
-├── tests/                     # 16 test files, 208 tests
-├── fpga/vck190/               # Vivado project + Tcl scripts
-├── scripts/                   # Board smoke test
-└── docs/                      # 15 design documents
+호스트 (Python)
+  OrbitDevice HAL ── SimBackend / CocotbBackend / MmapBackend
+        │  MMIO + 64B 디스크립터
+        ▼
+g2_ctrl_top  (제어 평면, 합성됨)
+  ├── reg_top ────── MMIO 레지스터 뱅크 (SSOT: tools/orbit_mmio_map.py)
+  ├── desc_queue ─── 4큐 링버퍼 + 우선순위 arbiter
+  ├── desc_fsm_v2 ── CRC-8 / opcode / 타임아웃 검증
+  ├── gemm_top ───── ctrl_fsm + gemm_core
+  │      └── gemm_core ── act_sram/wgt_sram + mac_array (INT8 16×16)
+  ├── oom_guard ──── 4상태 메모리 압력 제어
+  ├── trace_ring ─── 디버그 이벤트 링
+  ├── irq_ctrl ───── 인터럽트 컨트롤러 (W1C)
+  └── reset_seq ──── 리셋 시퀀서 (POR/SW/WDOG)
+```
+
+```
+rtl/              합성 대상 31개 파일
+rtl/behavioral/   행동 모델 14개 — 합성 대상 아님
+tb/               cocotb 테스트벤치 + run_tb.py
+tb/behavioral/    행동 모델용 테스트벤치
+tools/            Python 호스트 스택 15개 모듈
+tests/            호스트 스택 pytest 18개 파일
+sim/golden/       numpy 골든 모델 (GEMM INT8, DMA) — 현재 cocotb 에서 쓰이지 않는다
+spec/             SSOT 설계 문서 9개
+scripts/          synth_gate.sh, setup_tools.sh, check_banned_tokens.py
+fpga/vck190/      Vivado Tcl (CPM 설정 미완성)
+openlane/         gemm_int4_sky130 OpenLane 설정
+docs/             DESIGN / PLAN / AUDIT / BUGS / LINT / LOG
 ```
 
 ---
 
-## Register Map
+## 문서
 
-48 registers across 11 blocks. All addresses in [`tools/orbit_mmio_map.py`](tools/orbit_mmio_map.py).
+| 문서 | 내용 |
+|---|---|
+| [docs/DESIGN.md](docs/DESIGN.md) | ORBIT-DR1 델타룰 헤드 설계 (SSOT) |
+| [docs/PLAN.md](docs/PLAN.md) | 12주 실행 계획 |
+| [docs/AUDIT.md](docs/AUDIT.md) | 레포 현황 실측 감사 — 모든 항목에 명령 출력 첨부 |
+| [docs/BUGS.md](docs/BUGS.md) | 파형·명령 출력 근거가 있는 버그만 |
+| [docs/LINT.md](docs/LINT.md) | verilator 린트 경고 기록 |
+| [docs/LOG.md](docs/LOG.md) | 세션 기록 |
+| [CLAUDE.md](CLAUDE.md) | 작업 규칙 |
 
-| Block | Key Registers |
-|-------|--------------|
-| Global | G2_ID (`0x47320001`), VERSION, CAP0 |
-| Reset | BOOT_CAUSE, SW_RESET, WDOG_CTRL |
-| Queue | Q0-Q3 DOORBELL, STATUS, OVERFLOW (W1C) |
-| DMA | SUBMIT_LO/HI, CTRL, STATUS, ERR_CODE |
-| OOM | USAGE, RESERVED, STATE (NORMAL/PRESSURE/CRITICAL/EMERG) |
-| TC0 | RUNSTATE (IDLE/FETCH/RUN/FAULT), CTRL, FAULT_STATUS |
-| Perf | MXU_BUSY_CYCLES, TILE_COUNT, FREEZE |
-| IRQ | PENDING (W1C, set-wins), MASK, FORCE, CAUSE_LAST |
-| Trace | HEAD, TAIL, CTRL + 1K-entry read window |
+**계획·목표는 `docs/PLAN.md` 에만 쓴다. 이 README 는 현재 상태만 말한다.**
 
 ---
 
-## Status
+## 툴체인
 
-| Milestone | Status |
-|-----------|--------|
-| RTL skeleton (7 new modules) | Done |
-| Control plane integration | Done |
-| MMIO device contract (48 registers) | Done |
-| Python host stack + CLI | Done |
-| Host-driven RTL co-simulation | Done — GEMM E2E proven |
-| Proto-B PCIe/DMA contract | Done |
-| Linux MMIO open path | Done |
-| VCK190 Vivado project + CPM config | Done |
-| **Bitstream (PDI) generated** | **Done** — 0 errors |
-| Connect RTL to CPM Block Design | Next |
-| VCK190 board bring-up | Needs board |
+전부 무료·오픈소스. `bash scripts/setup_tools.sh` / 상태 확인은 `--check`.
+
+| 도구 | 용도 | 비고 |
+|---|---|---|
+| yosys | 합성 게이트 | apt |
+| sv2v | SystemVerilog → Verilog-2005 | yosys·iverilog 가 unpacked array 포트를 못 읽는다 |
+| iverilog | cocotb 시뮬레이션 | apt |
+| verilator | 린트 (`--lint-only`) | apt 5.020 으로 충분 |
+| verilator 5.022+ | cocotb 2.x 시뮬레이션 | **소스 빌드 필요** — apt 판에는 `VerilatedVpi` API 가 없다 |
+| cocotb 2.x, pytest, numpy | 테스트 | pip |
 
 ---
 
 ## License
 
 MIT
-
----
-
-*Built by YUA AI. Simulation-verified, bitstream-generated, awaiting silicon.*

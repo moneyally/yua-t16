@@ -7,9 +7,46 @@
 
 ## BUG-001 — fault 난 디스크립터가 완료 IRQ(`DESC_DONE`)를 올린다
 
-**상태**: 재현 완료 · 파형 확보 · **미수정**
-**발견**: `docs/AUDIT.md` §4 (코드 읽기 가설) → 2026-09-10 테스트로 확정
-**심각도**: 높음. 호스트가 실패를 성공으로 처리한다.
+**상태**: **수정 완료 (2026-09-11).** 재현 → 파형 → `docs/DESIGN.md` 5.1절 계약 신설 → RTL 수정 → 테스트 통과.
+**발견**: `docs/AUDIT.md` §4 (코드 읽기 가설) → 2026-09-10 테스트로 확정 → 2026-09-11 수정
+**심각도**: 높음이었다. 호스트가 실패를 성공으로 처리했다.
+
+### 수정 결과 (먼저)
+
+```
+$ python3 tb/run_tb.py g2_ctrl_top tb_g2_ctrl_top_fault_irq $(ls rtl/*.sv)
+NOP        IRQ_PENDING = 0x00000001 ['DESC_DONE']
+ILLEGAL    IRQ_PENDING = 0x00000020 ['TC0_FAULT']      <- 0x21 -> 0x20, DESC_DONE 사라짐
+ILLEGAL    TC0_FAULT_STATUS = 0x00000001
+CRCFAIL    IRQ_PENDING = 0x00000020 ['TC0_FAULT']
+** TESTS=3 PASS=3 FAIL=0 SKIP=0 **
+
+$ python3 tb/run_tb.py desc_fsm_v2 tb_desc_fsm_v2_done_pulse
+NOP:     retire=[(2, 1)] ok=[(2, 1)] err=[]        fault=None
+GEMM:    retire=[(5, 1)] ok=[(5, 1)] err=[]        fault=None
+ILLEGAL: retire=[(3, 1)] ok=[]       err=[(3, 1)]  fault=3
+CRCFAIL: retire=[(2, 1)] ok=[]       err=[(2, 1)]  fault=2
+TIMEOUT: retire=[(35,1)] ok=[]       err=[(35,1)]  fault=35
+** TESTS=6 PASS=6 FAIL=0 SKIP=0 **
+```
+
+**어떻게 고쳤나** — `docs/DESIGN.md` 5.1절(완료 신호 계약)을 SSOT 로 먼저 쓰고 RTL 을 맞췄다.
+`done_pulse` 하나를 셋으로 갈랐다:
+
+| 신호 | 의미 | 걸려 있는 것 |
+|---|---|---|
+| `done_ok` | 성공 완료 | **완료 IRQ (`DESC_DONE`)** |
+| `done_err` | 실패 종료 | (현재 소비자 없음. fault 는 `TC0_FAULT` 로 보고) |
+| `done_pulse` | 리타이어 = ok\|err | **자원 회수** (OOM 사용량 감소) |
+
+`desc_fsm_v2` 에 `came_from_fault` 레지스터를 넣어 `ST_DONE` 진입 경로를 구분한다.
+`ST_FAULT → ST_DONE` 전이는 **그대로 뒀다** — 자원 회수가 그 경로에 걸려 있어서,
+`ST_IDLE` 로 직행시키면 fault 트랜잭션마다 OOM 사용량이 누수된다.
+(`docs/DESIGN.md` 5.1절 규칙 4 가 이걸 명시한다.)
+
+`desc_done_count` 는 **성공 완료** 수로 바꿨다 (`fsm_done_ok`).
+
+### 아래는 발견 당시 기록 (2026-09-10)
 
 ### 증상
 
@@ -344,6 +381,49 @@ Warning: multiple conflicting drivers for desc_fsm_v2.\fault_code_r [7]:
 제어 평면 FSM 이 합성 불가 상태였고, 아무도 몰랐다.
 
 ---
+
+---
+
+## BUG-008 — verilator 복구로 드러난 기존 테스트 실패 6건 (전부 미수정)
+
+**상태**: **재현 완료 · 미수정.** 원인 분석 안 함.
+**어떻게 드러났나**: verilator 5.034 를 소스 빌드해서 `tb/` 38개를 처음으로 전부 돌렸다.
+그 전까지는 **하나도 실행할 수 없었다** (`docs/AUDIT.md` §4).
+
+```
+$ bash scripts/setup_tools.sh verilator     # 5.034, cocotb 2.x 호환
+$ for f in tb/tb_*.py tb/behavioral/tb_*.py; do python3 tb/run_tb.py <top> <mod> $(ls rtl/*.sv); done
+PASS 32 / TESTFAIL 5 / BUILDERR 1   (테스트벤치 38개)
+개별 테스트 153개 중 PASS 146 / FAIL 7
+```
+
+전체 결과: `build/tb/sweep.txt`, 모듈별 로그: `build/tb/sweep_<module>.log`
+
+| # | 테스트벤치 | DUT | 증상 | 우선순위 |
+|---|---|---|---|---|
+| 008a | `tb_cdc_fifo_async` | `cdc_fifo` | `Mismatch at 0: wrote 0xdead0000, read 0x0` — **데이터가 통과하지 않는다** | **높음** |
+| 008b | `tb_cdc_fifo_reset` | `cdc_fifo` | `Data corruption after reset: assert 0 == 3405643777` | **높음** |
+| 008c | `tb_oom_guard_thresholds` | `oom_guard` | `Expected PRESSURE, got 0` — `pressure_state` 가 전이하지 않는다 (2/2 실패) | 중 |
+| 008d | `tb_oom_guard_race` | `oom_guard` | 2/3 실패 (같은 모듈) | 중 |
+| 008e | `tb_trace_ring_wrap` | `trace_ring` | `head should have advanced, got 0` | 중 |
+| 008f | `tb_g3_desc_fsm` | `g3_desc_fsm` | `fault_code assert 1 == 4` — 미지원 opcode 가 `0x04` 대신 `0x01` 을 낸다 | 낮음 (G3 경로) |
+
+### 왜 이게 중요한가
+
+`cdc_fifo` 는 `CLAUDE.md` 2절이 **"구조 양호"** 로 분류한 모듈이다.
+그런데 BUG-002(포트 리스트 안의 `initial`) 때문에 **컴파일 자체가 안 됐고**,
+컴파일을 고치고 처음 돌려보니 **데이터가 통과하지 않는다.**
+즉 "구조 양호"의 근거가 된 테스트는 한 번도 실행된 적이 없다.
+
+`oom_guard` 도 마찬가지다 — `g2_ctrl_top` 레벨의 OOM 테스트(`tb_g2_ctrl_top_oom`)는 통과하는데
+모듈 단위 임계값 테스트는 0/2 다. 어느 쪽이 맞는지 **아직 모른다.**
+
+### 다음 단계 (이번 세션에서 하지 않음)
+
+각 항목마다 "테스트벤치가 틀렸나 / RTL 이 틀렸나"를 먼저 갈라야 한다.
+`docs/PLAN.md` 1단계가 **골든 모델 우선, RTL 금지**인 이유가 여기 있다 —
+정답을 바깥에서 가져오지 않으면 이 질문에 답할 수 없다.
+008a/008b(`cdc_fifo`)가 제어 평면의 CDC 경계라 가장 먼저다.
 
 ---
 
