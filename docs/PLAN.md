@@ -33,7 +33,7 @@
   - **측정·기록만**: o 오차(**전체 경로** — S 의 양자화가 d 번 누산으로 전파된 것)와 N토큰 누적 드리프트. d 가 커지면 반드시 커지므로 1 LSB 로 묶을 수 없다. RTL 검증은 골든 모델과 **비트 일치**(7절)로 하므로 float 드리프트는 판정에 쓰이지 않는다.
 - [x] W3-2 `tests/test_golden_deltarule.py`: 불변조건 I1~I5를 골든 모델 수준에서 검사. d=16, 64 모두.
 - [x] W4-1 `spec/deltarule.md`: opcode 3개(DELTA_INIT/STEP/DUMP) 디스크립터 필드, 레지스터 추가분, 완료 신호 정의("상태 쓰기 완료 후 1사이클"). `tools/orbit_mmio_map.py`, `tools/orbit_desc.py` 갱신 및 `tests/test_desc_pack.py` 통과.
-- [ ] W4-2 `tb/tb_dr1_top.py` 골격: RTL이 아직 없으므로 골든 모델을 DUT 자리에 두고 테스트 하네스 자체를 검증(하네스가 골든을 골든과 비교해 통과하는지). "RTL이 오면 DUT 한 줄만 바꾼다"가 완료 기준.
+- [x] W4-2 `tb/tb_dr1_top.py` 골격: RTL이 아직 없으므로 골든 모델을 DUT 자리에 두고 테스트 하네스 자체를 검증(하네스가 골든을 골든과 비교해 통과하는지). "RTL이 오면 DUT 한 줄만 바꾼다"가 완료 기준.
 
 **4주 종료 기준**: `pytest tests/test_golden_deltarule.py` 통과 / spec 문서와 mmio_map이 일치 / 하네스가 골든-대-골든으로 통과.
 
