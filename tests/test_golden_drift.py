@@ -124,3 +124,26 @@ def test_drift_grows_with_alpha_near_one():
         f"α≈0.9999 드리프트 {hi[400]:.2f} ≤ α≈0.85 드리프트 {lo[400]:.2f} LSB. "
         f"느리게 잊을수록 오차가 더 쌓여야 한다 — 방향이 반대다"
     )
+
+
+def test_drift_bounded_at_d64():
+    """d=64 에서도 유계인가 — **실제로 쓰려는 차원**이 여기다.
+
+    d=16 은 먼저 끝내려고 고른 크기다 (`docs/DESIGN.md` 4절). 델타룰 헤드의
+    현실적인 차원은 64 이상이고, 상태 원소가 16배라 오차가 더 쌓일 여지가 있다.
+    d=16 만 보고 "유계다" 라고 말하면 그건 확인 안 한 것을 말하는 것이다.
+
+    토큰당 골든 연산이 d² 라 느리다 — 200토큰까지만 본다. 자라는지 아닌지는
+    그 구간에서 이미 드러난다 (d=16 표에서 100→200 이 가장 많이 오르는 구간이다).
+    """
+    rng = np.random.default_rng(64064)
+    series, sat = drift_series(64, 200, rng, [50, 200], alpha_range=(0.99, 0.999))
+    early, late = series[50], series[200]
+    assert late <= 18.0, (
+        f"d=64 200토큰 드리프트 {late:.2f} LSB > 18. (50토큰에서는 {early:.2f}) "
+        f"— d=16 에서 유계라고 d=64 도 그렇다고 가정하면 안 된다"
+    )
+    assert late <= max(3.0 * early, 2.0), (
+        f"d=64 에서 드리프트가 자란다 — 50토큰 {early:.2f} → 200토큰 {late:.2f} LSB"
+    )
+    assert sat == 0, f"d=64: 포화가 {sat}회 났다"

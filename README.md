@@ -11,14 +11,14 @@ SystemVerilog RTL 과 Python 호스트 스택. **시뮬레이션 단계이며 �
 
 | 블록 | 상태 | 근거 |
 |---|---|---|
-| **ORBIT-DR1 델타룰 헤드 (d=16)** — `dr1_top` + `matvec_unit`/`update_unit`/`err_unit`/`requant_q15`/`state_sram`/`vec_regs`/`dr1_scratch` | **동작 + 비트 정확** | `DELTA_INIT`/`STEP`/`DUMP` 전부. 골든 `step()` 과 **1,000토큰 × 시드 3개 비트 일치** (`bash scripts/run_dr1_tb.sh` → **17/17, 99 테스트**). 126사이클/토큰 (d=16, `dr1_top` 내부), 462 (d=64). 호스트가 읽는 `DR1_CYCLES` 는 디스패치 1사이클을 포함해 **127** 이다 |
+| **ORBIT-DR1 델타룰 헤드 (d=16)** — `dr1_top` + `matvec_unit`/`update_unit`/`err_unit`/`requant_q15`/`state_sram`/`vec_regs`/`dr1_scratch` | **동작 + 비트 정확** | `DELTA_INIT`/`STEP`/`DUMP` 전부. 골든 `step()` 과 **1,000토큰 × 시드 3개 비트 일치** (`bash scripts/run_dr1_tb.sh` → **17/17, 101 테스트**). 126사이클/토큰 (d=16, `dr1_top` 내부), 462 (d=64). 호스트가 읽는 `DR1_CYCLES` 는 디스패치 1사이클을 포함해 **127** 이다 |
 | **호스트 경로 E2E** — `dev.delta_step()` → 디스크립터 → RTL → 결과 | **동작** | `tb/tb_dr1_host_e2e.py` 6/6. 스크래치 MMIO 창 왕복 포함 |
 | **보드 최상위 전체** — `dr1_soc_top` = `axil_reg_bridge` + `g2_ctrl_top` + `axi4_master_adapter` | **시뮬레이션 검증** | `tb/tb_dr1_soc_top.py` 6/6 — 호스트 스택이 **AXI4-Lite 만으로** `G2_ID` 읽기 → `DELTA_INIT` → `DELTA_STEP` 10토큰 골든 비트 일치. `tb/tb_axil_reg_bridge.py` 7/7. **보드에서는 안 돌려봤다** ([docs/FPGA.md](docs/FPGA.md)) |
 | `mac_pe`, `mac_array` — INT8 16×16 출력 고정 외적 누산 | **합성됨** | `mac_array` 196,352 cells (`scripts/synth_gate.sh`) |
 | 제어 평면 — `reg_top`, `desc_queue`, `desc_fsm_v2`, `irq_ctrl`, `trace_ring`, `oom_guard`, `reset_seq`, `wdog_timer`, `cdc_fifo` | **합성됨** | `g2_ctrl_top` 885,790 cells (DR1 포함) |
 | **워치독** — `wdog_timer` | **동작** | `tb/tb_wdog_timer.py` 7/7 (사이클 단위로 파이썬 모델과 대조) + `tb/tb_g2_ctrl_top_wdog.py` 6/6 (레지스터→리셋→`BOOT_CAUSE[1]` 전체 경로). 전에는 레지스터만 있고 타이머가 없었다 |
 | `gemm_core` / `gemm_top` — DMA + MAC 오케스트레이션 | **합성됨** | 429,672 / 430,404 cells |
-| Python 호스트 스택 (`tools/`) — HAL, 디스크립터 패커, 레지스터맵 SSOT, 트레이스 디코더, CLI | **동작** | `python3 -m pytest tests/ -q` → **343 passed, 8 xfailed** |
+| Python 호스트 스택 (`tools/`) — HAL, 디스크립터 패커, 레지스터맵 SSOT, 트레이스 디코더, CLI | **동작** | `python3 -m pytest tests/ -q` → **344 passed, 8 xfailed** |
 | PCIe (`pcie_ep_versal`, `g2_protob_top`) | **범위 밖** | Versal CPM 용이다. 타깃 보드가 KV260(Zynq MPSoC)이라 이 경로는 안 쓴다. 아래 "범위 밖" 참조 |
 | **AXI4 마스터 (외부 메모리)** — `axi4_master_adapter` | **시뮬레이션 검증** | `tb/tb_axi4_master_adapter.py` 8/8. 256 beat 상한·4KB 경계에서 버스트를 쪼갠다 (슬레이브 모델이 위반을 assert 한다). `dr1_soc_top` 에 결선됨. **실제 DDR 에 붙여 본 적 없다** |
 | 학습 경로 (`optimizer_unit`, `loss_scaler`, `collective_engine`, G3 top) | **행동 모델 (합성 불가)** | `rtl/behavioral/` 로 격리. 아래 참조 |
@@ -108,7 +108,7 @@ sv2v → yosys 로 `rtl/` 전체를 3단 검사한다:
 
 ```bash
 python3 -m pytest tests/ -q
-# 343 passed, 8 xfailed
+# 344 passed, 8 xfailed
 ```
 
 xfail 8건: `fpga/vck190/create_cpm_ip.tcl` 에 CPM 설정이 없어서 5건,

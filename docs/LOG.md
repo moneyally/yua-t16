@@ -118,8 +118,17 @@ Q1.15 상태가 200토큰 뒤에 다른 것이 되어 있으면 비트 정확도
   구멍이 아니라 "그래도 발산하지 않는다" 는 측정 결과이고, 반올림은
   `test_golden_deltarule.py` 가 지킨다. 둘 다 문서에 적었다.
 
-검증: `python3 -m pytest tests/ -q` → **343 passed, 8 xfailed** ·
-`python3 scripts/mutation_test.py` → **18/18 killed**.
+d=64 도 같이 지킨다 (`test_drift_bounded_at_d64`) — d=16 에서 유계라고 d=64 도
+그렇다고 가정하면 그건 확인 안 한 것을 말하는 것이다. 상태 원소가 16배다.
+
+마지막으로 **문서의 숫자를 전부 명령 출력과 대조**했다. README 의
+"17/17, 99 테스트" 가 실제 101 과 달랐다 (W7·W8 을 더하고 안 고쳤다) — 고쳤다.
+셀 수(196,352 / 885,790)는 `scripts/cell_baseline.txt` 와 일치한다.
+
+검증: `python3 -m pytest tests/ -q` → **344 passed, 8 xfailed** ·
+`python3 scripts/mutation_test.py` → **18/18 killed** ·
+`python3 scripts/check_banned_tokens.py rtl/*.sv rtl/*.v rtl/dr1/*.sv` → clean ·
+`bash scripts/run_dr1_tb.sh` → **17/17 ok (101 테스트)**.
 RTL 변경 없음 — 합성 게이트는 직전 실행이 유효하다.
 
 ---
