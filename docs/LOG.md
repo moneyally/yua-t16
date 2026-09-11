@@ -68,6 +68,24 @@ scripts/synth_gate.sh` → **PASS**, 셀 회귀 없음(새 기준선 항목 0) �
 `python3 -m pytest tests/ -q` → **336 passed, 8 xfailed** ·
 `python3 scripts/mutation_test.py` → **17/17 killed**.
 
+### 이어서 — 워치독이 **동작 중에** 터지는 경우 (W7·W8)
+
+W1~W6 은 칩이 놀고 있을 때만 봤다. 그런데 워치독이 실제로 터지는 때는 **칩이
+멈췄을 때**, 즉 `DELTA_STEP` 한가운데다. 거기서 안 되살아나면 워치독은 구조
+장치가 아니라 벽돌 만드는 장치다 — 그걸 아무도 안 보고 있었다.
+
+- **W7**: `DR1_STATUS[0]`(busy)이 선 것을 확인한 뒤 리셋을 쏘고, 풀린 다음
+  호스트 스택으로 `DELTA_INIT`+`DELTA_STEP` → **골든과 비트 일치**. 상태 `S` 까지
+  대조한다 (`state_sram` 이 깨끗하게 돌아왔는가).
+- **W8**: 잘린 디스크립터가 **유령 `DESC_DONE`** 을 안 남긴다 (BUG-001 과 같은 성격).
+- "40사이클쯤이면 한가운데겠지" 로 세지 **않는다.** 디코드가 길어지는 날 리셋이
+  STEP 시작 전에 떨어지고, 테스트는 통과하는데 보려던 것은 안 보게 된다.
+  `DR1_STATUS` busy 를 직접 본다.
+
+검증: `tb_g2_ctrl_top_wdog` **8/8** · `bash scripts/run_dr1_tb.sh` → **17/17 ok
+(101 테스트)** · `python3 -m pytest tests/ -q` → **336 passed, 8 xfailed**.
+RTL 변경 없음(테스트벤치·문서만) — 합성 게이트는 직전 실행이 유효하다.
+
 ---
 
 ## 2026-09-11 (세션 11, 자율 위임) — W7~W11: DELTA_STEP 완성 · 호스트 E2E · 보드 前 준비

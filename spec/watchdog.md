@@ -97,8 +97,28 @@ await dev.wdog_disable()
 |---|---|
 | 타이머 단독 (리로드·킥·EN·PERIOD 반영 시점·펄스 1사이클) | `tb/tb_wdog_timer.py` |
 | 레지스터 필드 디코드 + 읽기값 (KICK/TEST_FIRE 가 0 으로 읽힘) | `tb/tb_g2_ctrl_top_wdog.py` |
-| 통합: 킥을 멈추면 리셋되고 `BOOT_CAUSE[1]` 이 선다 | `tb/tb_g2_ctrl_top_wdog.py` |
+| 통합: 킥을 멈추면 리셋되고 `BOOT_CAUSE[1]` 이 선다 | `tb/tb_g2_ctrl_top_wdog.py` W3 |
+| **`DELTA_STEP` 한가운데 리셋 → 되살아나서 골든과 비트 일치** | `tb/tb_g2_ctrl_top_wdog.py` W7 |
+| 잘린 디스크립터가 **유령 `DESC_DONE` 을 안 남긴다** | `tb/tb_g2_ctrl_top_wdog.py` W8 |
 | 레지스터맵 SSOT 일치 | `tests/test_mmio_map.py` |
 
 **기대값의 출처는 이 문서다.** 계산이 없는 블록이라 `sim/golden/` 대응이 없다 —
 `tb/tb_wdog_timer.py` 는 이 절의 표를 파이썬으로 다시 적은 모델과 비교한다.
+
+
+---
+
+## 5. 왜 "동작 중 리셋" 을 따로 보는가 (W7·W8)
+
+W1~W6 은 칩이 **놀고 있을 때** 워치독을 본다. 그런데 워치독이 실제로 터지는 때는
+**칩이 멈췄을 때**, 즉 `DELTA_STEP` 한가운데다. 놀 때만 확인하고 끝내면,
+정작 필요한 순간의 동작은 아무도 안 본 것이 된다.
+
+W7 은 `DR1_STATUS[0]`(busy)이 선 것을 **확인한 뒤** 리셋을 쏘고, 풀린 다음
+호스트 스택으로 `DELTA_INIT` + `DELTA_STEP` 을 돌려 골든과 비트 비교한다.
+"몇 사이클쯤이면 한가운데겠지" 로 세지 않는다 — 디스크립터 디코드가 길어지는 날
+리셋이 STEP 시작 전에 떨어지고, 테스트는 통과하는데 보려던 것은 안 보게 된다.
+
+W8 은 잘린 디스크립터가 `DESC_DONE` 을 올리지 않는지 본다. `docs/BUGS.md` BUG-001
+과 같은 성격이다: 끝나지 않은 디스크립터의 완료 IRQ 는 호스트가 **없는 결과를
+읽으러 가게** 만든다.
