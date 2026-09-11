@@ -8,7 +8,7 @@
 
 - **한 것**: **W7** `DELTA_STEP` 전체 경로 — `err_unit.sv`(골든 `compute_err` 비트 일치) + `dr1_scratch.sv`(q/k/v/o 온칩 스크래치, 호스트 MMIO 창 `0x8033_1000`) 신설, `dr1_top` 에 LOAD→MV_K→ERR→UPD×d→MV_Q→WR_O FSM. **W8** 1,000토큰 × 시드 3개 비트 일치, `SAT_EVENT`/`CLAMP_EVENT` 트레이스 연동. **W9·W10** `OrbitDevice.delta_init/step/dump` + 스크래치 접근 → 호스트 스택으로 RTL E2E (`tb_dr1_host_e2e.py`). **W11(보드 前)** `axil_reg_bridge.sv`(AXI4-Lite, tb 7/7) + `dr1_soc_top.sv` + `fpga/kv260/` + `docs/FPGA.md`. **스텁 정리**: `pcie_ep_versal` 의 BAR 출력을 정의된 값으로 구동해 `check -assert` 171건 → 0건, **게이트 known-incomplete 목록이 비었다**. **뮤테이션 테스트** `scripts/mutation_test.py` 신설 — 13/13 killed.
 - **안 된 것**: `DELTA_STEP` 이 **205사이클**이다 (계약 상한 64의 3.2배). 내역과 줄일 방법을 DESIGN 6.2 에 적고 **상한은 안 고쳤다**. **d=64 불가** — 스크래치 1024원소에 64² 덤프가 안 들어간다 (4608 필요, spec 3.6절에 한계로 명시). Vivado 는 이 컨테이너에 없어서 **자원·타이밍 전부 미측정** (docs/FPGA.md 에 "측정값 없음"으로 비워 뒀다). CQ→BAR TLP 디코드는 PG347 확인 전이라 구현 안 함 — **PCIe 는 여전히 동작하지 않는다**. `backward_engine`/`g3_int_top`/`gemm_int4_synth`/`mxu_bf16_16x16` 시간 초과 여전.
-- **검증 명령**: `bash scripts/synth_gate.sh --check-mem dr1_scratch` → **STAGE1 43/43 (known 0)** · `dr1_scratch $mem_v2 x1` · `bash scripts/run_dr1_tb.sh` → **12/12 ok (68 테스트)** · `python3 -m pytest tests/ -q` → **322 passed, 8 xfailed** (실패 0) · `python3 scripts/mutation_test.py` → **13/13 killed** · `python3 scripts/check_banned_tokens.py rtl/*.sv rtl/*.v rtl/dr1/*.sv` → clean · verilator 경고 신규 0건.
+- **검증 명령**: `bash scripts/synth_gate.sh --check-mem dr1_scratch` → **STAGE1 43/43 (known 0)** · `dr1_scratch $mem_v2 x1` · `bash scripts/run_dr1_tb.sh` → **13/13 ok (72 테스트, d=64 포함)** · `python3 -m pytest tests/ -q` → **322 passed, 8 xfailed** (실패 0) · `python3 scripts/mutation_test.py` → **13/13 killed** · `python3 scripts/check_banned_tokens.py rtl/*.sv rtl/*.v rtl/dr1/*.sv` → clean · verilator 경고 신규 0건.
 - **다음 세션 첫 작업**: (a) 사이클 최적화 — 스크래치 포트 128비트화(LOAD 50→8) + `update_unit` 행 파이프라인(96→~34) 로 205 → 약 85 목표, **먼저 골든 비트 일치를 깨지 않는지부터** 확인. (b) d=64 로 가려면 스크래치를 4608원소로 키우고 `dr1_scratch_layout(64)` 를 열어야 한다. (c) `docs/RESEARCH.md` Q-F 실험은 **승인 대기** 상태 그대로 둠.
 - **결정 필요**: (1) 205사이클을 최적화할지, 아니면 d=16 을 이대로 굳히고 보드로 갈지. (2) **BUG-009 가 중요한 교훈을 줬다** — "1토큰 비트 일치"는 초기 상태가 0 이라 상태 경로 버그를 숨긴다. 앞으로 어떤 경로든 **최소 10토큰**을 통과 기준으로 삼자는 제안. (3) 보드 구매는 손대지 않았다 (위임 범위 밖). PLAN W11 결정 게이트는 정원 몫.
 
@@ -30,6 +30,27 @@
 남은 거리와 성격은 DESIGN 6.3 에 적었다: `matvec` 40사이클은 1R1W SRAM 의
 **구조적 하한**이고, 나머지(갱신 3→2, 스크래치 128비트)를 다 해도 약 80 이다.
 계약 64 는 **피연산자 이동을 세지 않은 숫자**라, 그때 계약 쪽을 고칠지 정한다.
+
+### d=64 확장 확인 (PLAN W8 "d=64 확장은 W8 완료 후에만")
+
+**같은 RTL 을 파라미터만 바꿔** 돌렸다. 파일을 복제하지 않았다 — 복제하면
+한쪽만 고치는 날이 온다. `tb/run_tb.py` 에 `PARAM_*` 환경변수 지원을 넣었다.
+
+```
+PARAM_D=64 PARAM_SCRATCH=8192 python3 tb/run_tb.py dr1_tb_wrap tb_dr1_d64 <소스>
+  X1 d=64 INIT→DUMP 골든 일치 / X2 1토큰 / X3 20토큰 + 포화 수 / X4 사이클 실측
+  TESTS=4 PASS=4
+```
+
+| | d=16 | d=64 |
+|---|---|---|
+| `DELTA_STEP` 사이클 | 126 | **462** (3.7배) |
+| 계약 상한 4·d | 64 | 256 |
+| 초과 배수 | 2.0× | **1.8×** ← d 가 커질수록 가까워진다 |
+
+구조가 d 에 대해 선형이라는 뜻이다 (고정 오버헤드가 희석된다).
+**통합 빌드는 d=16 그대로** 뒀다 — d=64 는 면적이 약 4배라 KV260 에 들어갈지
+Vivado 없이는 모른다.
 
 ### 게이트에 **셀 수 회귀 검사**를 넣었다 (BUG-011 의 결과)
 

@@ -11,7 +11,7 @@ SystemVerilog RTL 과 Python 호스트 스택. **시뮬레이션 단계이며 �
 
 | 블록 | 상태 | 근거 |
 |---|---|---|
-| **ORBIT-DR1 델타룰 헤드 (d=16)** — `dr1_top` + `matvec_unit`/`update_unit`/`err_unit`/`requant_q15`/`state_sram`/`vec_regs`/`dr1_scratch` | **동작 + 비트 정확** | `DELTA_INIT`/`STEP`/`DUMP` 전부. 골든 `step()` 과 **1,000토큰 × 시드 3개 비트 일치** (`bash scripts/run_dr1_tb.sh`). `dr1_top` 126사이클/토큰 |
+| **ORBIT-DR1 델타룰 헤드 (d=16)** — `dr1_top` + `matvec_unit`/`update_unit`/`err_unit`/`requant_q15`/`state_sram`/`vec_regs`/`dr1_scratch` | **동작 + 비트 정확** | `DELTA_INIT`/`STEP`/`DUMP` 전부. 골든 `step()` 과 **1,000토큰 × 시드 3개 비트 일치** (`bash scripts/run_dr1_tb.sh` → 13/13, 72 테스트). 126사이클/토큰 (d=16), 462 (d=64) |
 | **호스트 경로 E2E** — `dev.delta_step()` → 디스크립터 → RTL → 결과 | **동작** | `tb/tb_dr1_host_e2e.py` 6/6. 스크래치 MMIO 창 왕복 포함 |
 | **AXI4-Lite 브리지** — `axil_reg_bridge`, `dr1_soc_top` | **시뮬레이션 검증** | `tb/tb_axil_reg_bridge.py` 7/7. **보드에서는 안 돌려봤다** ([docs/FPGA.md](docs/FPGA.md)) |
 | `mac_pe`, `mac_array` — INT8 16×16 출력 고정 외적 누산 | **합성됨** | `mac_array` 196,352 cells (`scripts/synth_gate.sh`) |
@@ -29,8 +29,10 @@ SystemVerilog RTL 과 Python 호스트 스택. **시뮬레이션 단계이며 �
 - **`DELTA_STEP` 은 토큰당 126 사이클**이다. `docs/DESIGN.md` 6절 계약 상한은 64 —
   **2.0배 초과**다 (최초 205에서 줄였다. 내역은 `docs/DESIGN.md` 6.2·6.3절).
   상한을 고쳐 쓰지 않았다.
-- **d=64 는 아직 안 된다.** 스크래치(1024 원소)에 64×64 덤프가 안 들어간다
-  (`spec/deltarule.md` 3.6절). 4608 원소로 키워야 한다.
+- **d=64 는 시뮬레이션까지만 확인했다.** 같은 RTL 을 `PARAM_D=64 PARAM_SCRATCH=8192`
+  로 돌려 골든과 20토큰 비트 일치, 462사이클/토큰
+  (`tb/tb_dr1_d64.py`). **통합 빌드(`g2_ctrl_top`)는 면적 때문에 d=16 그대로**다 —
+  d=64 가 보드에 들어갈지는 Vivado 를 돌려야 안다.
 - **실물 보드 없음.** Vivado 합성·타이밍은 한 번도 돌린 적이 없다 ([docs/FPGA.md](docs/FPGA.md)).
 - **PCIe·외부 메모리 없음.** 아래 표 참조.
 

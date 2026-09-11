@@ -70,6 +70,12 @@ run_one g2_ctrl_top    tb_dr1_host_e2e          $(ls rtl/*.sv rtl/dr1/*.sv)
 # 보드 경로의 앞단 — AXI4-Lite 브리지 (W11). 보드는 없지만 프로토콜은 지금 검증한다
 run_one axil_reg_bridge tb_axil_reg_bridge      rtl/axil_reg_bridge.sv
 
+# d=64 확장 — **같은 RTL 을 파라미터만 바꿔** 돌린다 (파일 복제 금지).
+# 스크래치를 8192 원소로 키워야 64x64 덤프가 들어간다 (spec/deltarule.md 3.6절).
+echo ""
+echo "--- d=64 확장 (같은 RTL, 파라미터만) ---"
+PARAM_D=64 PARAM_SCRATCH=8192 run_one dr1_tb_wrap tb_dr1_d64 $DR1_ALL
+
 echo ""
 if [ "$FAIL" -eq 0 ]; then
   echo "=== 전부 통과 ==="

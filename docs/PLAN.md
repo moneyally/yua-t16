@@ -44,7 +44,7 @@
 - [x] W5 `rtl/dr1/state_sram.sv`(16×16 Q1.15, 1R1W), `rtl/dr1/vec_regs.sv`, `rtl/dr1/matvec_unit.sv`. 각각 단위 cocotb + yosys 게이트. **(+`requant_q15.sv`. 전부 골든 비트 일치, 게이트 EXIT=0)**
 - [x] W6 `rtl/dr1/update_unit.sv`(골든 `update_row` 비트 일치) + `rtl/dr1/dr1_top.sv` FSM **골격**: IDLE/INIT/DUMP/DONE_OK/DONE_ERR 만 살아 있고 `DELTA_STEP` 은 `fault_code 0x07 DR1_UNIMPL`. `desc_fsm_v2`·`reg_top` 배선, **I1 을 실 RTL 로 통과**, RTL 경로 오류 주입, BUG-001 회귀를 DR1 fault 로 확장. LOAD_QKV/MATVEC/ERR/WRITE_O 는 **W7**.
 - [x] W7 `DELTA_STEP` 전체 경로 (`err_unit.sv`, `dr1_scratch.sv` 추가). **1 → 10 → 100토큰 비트 일치** 확인. 실측 **126사이클** (최초 205에서 최적화. 계약 64 초과 — DESIGN 6.2·6.3에 내역·남은 거리 기록).
-- [x] W8 **1,000토큰 × 시드 3개 비트 일치** (`tb_dr1_harness_rtl.py` R9). `SAT_EVENT`/`CLAMP_EVENT` 를 g2_ctrl_top 트레이스 링에 연동. **d=16 완료.** d=64 는 스크래치를 4608 원소로 키워야 가능 (spec 3.6절 한계).
+- [x] W8 **1,000토큰 × 시드 3개 비트 일치** (`tb_dr1_harness_rtl.py` R9). `SAT_EVENT`/`CLAMP_EVENT` 를 g2_ctrl_top 트레이스 링에 연동. **d=16 완료.** **d=64 도 확인** — 같은 RTL 을 `PARAM_D=64 PARAM_SCRATCH=8192` 로 돌려 20토큰 비트 일치, 462사이클 (`tb/tb_dr1_d64.py`). 통합 빌드는 면적 때문에 d=16 유지.
 
 **8주 종료 기준**: `make -C tb dr1` 이 1,000토큰 × 3시드 비트 일치 출력 / synth_gate 통과 / DESIGN.md 6절 사이클 예산과 실측 사이클 비교표 기록.
 **사용자 검증**: 파형(GTKWave)으로 `DELTA_STEP` 한 토큰을 직접 열어 FSM 상태 전이를 눈으로 따라간다. 이 주가 파형 읽기를 배우는 주다.

@@ -61,6 +61,15 @@ def main() -> int:
         print("소스 없음:", *missing, sep="\n  ", file=sys.stderr)
         return 2
 
+    # 파라미터 덮어쓰기: PARAM_D=64 처럼 환경변수로 준다.
+    # (d=64 확장처럼 같은 RTL 을 다른 크기로 돌릴 때 쓴다 — 파일을 복제하지 않는다)
+    parameters = {}
+    for key, val in os.environ.items():
+        if key.startswith("PARAM_"):
+            parameters[key[len("PARAM_"):]] = int(val, 0)
+    if parameters:
+        print(f"[run_tb] 파라미터 덮어쓰기: {parameters}")
+
     # verilator 5.022+ 가 있으면 그쪽이 기본이다 (네이티브 SystemVerilog, sv2v 불필요).
     # 없거나 구버전이면 icarus + sv2v 로 내려간다.
     sim = os.environ.get("SIM") or ("verilator" if _verilator_ok() else "icarus")
@@ -99,6 +108,7 @@ def main() -> int:
     runner.build(
         verilog_sources=[str(p) for p in sources],
         hdl_toplevel=toplevel,
+        parameters=parameters,
         build_dir=str(build_dir),
         build_args=build_args,
         always=True,

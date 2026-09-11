@@ -267,7 +267,7 @@ DR1_SCRATCH_END   = DR1_SCRATCH_BASE + DR1_SCRATCH_WORDS * 4 - 4
 DR1_DUMP_ELEM     = 512           # DELTA_DUMP 기본 목적지 (원소 인덱스)
 
 
-def dr1_scratch_layout(d: int) -> dict:
+def dr1_scratch_layout(d: int, scratch_words: int | None = None) -> dict:
     """DR1 스크래치의 표준 배치. **단일 출처** (spec/deltarule.md 3.6절).
 
     테스트벤치(`tb/tb_dr1_top.py` CocotbDut)와 호스트 HAL(`tools/orbit_device.py`)이
@@ -275,7 +275,12 @@ def dr1_scratch_layout(d: int) -> dict:
 
     반환값은 **원소 인덱스**다. 바이트 주소는 ×2.
     모든 벡터 시작점은 16바이트 정렬이어야 한다 (= 원소 인덱스가 8의 배수).
+
+    `scratch_words` 를 주면 그 크기로 검사한다. d=64 는 덤프(64²=4096)가
+    기본 스크래치(1024)에 안 들어가므로, 더 큰 스크래치로 파라미터화한
+    시뮬레이션에서만 쓴다 (`tb/tb_dr1_d64.py`).
     """
+    words = DR1_SCRATCH_WORDS if scratch_words is None else int(scratch_words)
     layout = {
         "q": 0,
         "k": d,
@@ -289,8 +294,11 @@ def dr1_scratch_layout(d: int) -> dict:
                 f"d={d} 에서 {name} 시작 원소 {elem} (바이트 {elem*2}) 가 "
                 f"{DR1_ADDR_ALIGN}바이트 정렬이 아니다 — 하드웨어가 0x06 을 낸다"
             )
-    if layout["o"] + d > DR1_SCRATCH_WORDS or layout["dump"] + d * d > DR1_SCRATCH_WORDS:
-        raise ValueError(f"d={d} 는 스크래치 {DR1_SCRATCH_WORDS} 원소에 들어가지 않는다")
+    if layout["o"] + d > words or layout["dump"] + d * d > words:
+        raise ValueError(
+            f"d={d} 는 스크래치 {words} 원소에 들어가지 않는다 "
+            f"(필요: 덤프 {layout['dump'] + d * d}, 벡터 {layout['o'] + d})"
+        )
     return layout
 
 
