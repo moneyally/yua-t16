@@ -28,7 +28,9 @@
 
 목표: 정답지를 먼저 만든다. 이 2주 동안 RTL 파일을 만들거나 수정하지 않는다.
 
-- [ ] W3-1 `sim/golden/deltarule.py`: DESIGN.md 2절 정확식, Q1.15 정수 연산, round-half-to-even, 포화. 함수 `step(S, q, k, v, alpha, beta) -> (S_next, o, sat_count)`. float 참조 구현을 별도 함수로 두고, 정수 구현과 float 구현의 오차가 예상 범위(1 LSB 이내)인지 검사하는 자체 테스트.
+- [x] W3-1 `sim/golden/deltarule.py`: DESIGN.md 2절 정확식, Q1.15 정수 연산, round-half-to-even, 포화. 함수 `step(S, q, k, v, alpha, beta) -> (S_next, o, sat_count)`. float 참조 구현을 별도 함수로 두고, 정수 구현과 float 구현의 오차를 검사하는 자체 테스트. **오차 기준은 둘로 나눈다** (2026-09-11 결정):
+  - **게이트**: S 오차 ≤ 1 LSB, o 오차(**고립** — 정수 S_next 를 기준으로 한 o=S·q 단계만) ≤ 1 LSB.
+  - **측정·기록만**: o 오차(**전체 경로** — S 의 양자화가 d 번 누산으로 전파된 것)와 N토큰 누적 드리프트. d 가 커지면 반드시 커지므로 1 LSB 로 묶을 수 없다. RTL 검증은 골든 모델과 **비트 일치**(7절)로 하므로 float 드리프트는 판정에 쓰이지 않는다.
 - [ ] W3-2 `tests/test_golden_deltarule.py`: 불변조건 I1~I5를 골든 모델 수준에서 검사. d=16, 64 모두.
 - [ ] W4-1 `spec/deltarule.md`: opcode 3개(DELTA_INIT/STEP/DUMP) 디스크립터 필드, 레지스터 추가분, 완료 신호 정의("상태 쓰기 완료 후 1사이클"). `tools/orbit_mmio_map.py`, `tools/orbit_desc.py` 갱신 및 `tests/test_desc_pack.py` 통과.
 - [ ] W4-2 `tb/tb_dr1_top.py` 골격: RTL이 아직 없으므로 골든 모델을 DUT 자리에 두고 테스트 하네스 자체를 검증(하네스가 골든을 골든과 비교해 통과하는지). "RTL이 오면 DUT 한 줄만 바꾼다"가 완료 기준.
