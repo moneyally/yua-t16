@@ -264,16 +264,18 @@ def test_alpha_beta_above_one_is_clamped_not_faulted():
 # ═══════════════════════════════════════════════════════════════════════════
 # CocotbDut 자리
 # ═══════════════════════════════════════════════════════════════════════════
-def test_cocotb_dut_init_dump_implemented_step_is_w7():
-    """기대값 출처: PLAN W6 — CocotbDut 의 init/dump 는 구현됐고 step 은 W7 이다.
+def test_cocotb_dut_implements_all_three_opcodes():
+    """기대값 출처: PLAN W7 — CocotbDut 의 init/step/dump 가 전부 구현됐다.
 
-    **이 테스트는 W4-2 의 "CocotbDut 은 아직 자리만 있다" 를 대체한다.**
-    전제가 바뀌었다 (RTL 이 생겼다). 기대값을 바꿔서 통과시킨 것이 아니라,
-    검사 대상이 바뀐 것이다 — 옛 버전은 `CocotbDut()` 이 NotImplementedError 를
-    내는지 봤고, 지금은 그 반대를 본다.
+    **이 테스트는 두 번 갈아탔다.**
+      W4-2: `CocotbDut()` 이 NotImplementedError 를 내는지 (자리만 있음)
+      W6  : init/dump 는 되고 step 은 W7 이라 터지는지
+      W7  : 셋 다 코루틴으로 구현됐고, 스크래치 배치가 SSOT 를 쓰는지
+    기대값을 바꿔 통과시킨 게 아니라 **검사 대상이 매주 바뀐 것**이다.
     """
-    import asyncio
     import inspect
+
+    from tools.orbit_mmio_map import dr1_scratch_layout
 
     # 생성자는 cocotb 없이도 만들어져야 한다 (핸들만 들고 있는다)
     dut = CocotbDut(dut=None, d=16)
@@ -284,15 +286,19 @@ def test_cocotb_dut_init_dump_implemented_step_is_w7():
             f"{name} 은 코루틴이어야 한다 — RTL 을 몰려면 await 이 필요하다"
         )
 
-    # step 은 W7 이다. 조용히 0 을 돌려주지 않고 확실히 터져야 한다.
-    with pytest.raises(NotImplementedError, match="W7"):
-        asyncio.run(dut.step(0, None, None, None, 0, 0))
+    # 스크래치 배치는 spec/deltarule.md 3.6절의 단일 출처를 따라야 한다
+    lay = dr1_scratch_layout(16)
+    assert (dut.q_elem, dut.k_elem, dut.v_elem, dut.o_elem) == (
+        lay["q"], lay["k"], lay["v"], lay["o"]
+    ), "CocotbDut 이 자기 배치를 따로 들고 있다 — SSOT 가 갈라졌다"
+    assert dut.dump_elem == lay["dump"]
 
     # 주소 정렬 계약 (spec/deltarule.md 4절)
-    assert CocotbDut.DUMP_ADDR % DR1_ADDR_ALIGN == 0
+    for elem in (dut.q_elem, dut.k_elem, dut.v_elem, dut.o_elem, dut.dump_elem):
+        assert (elem * 2) % DR1_ADDR_ALIGN == 0
 
     doc = CocotbDut.__doc__
-    for piece in ("falling edge", "done_ok", "done_pulse", "BUG-008", "BUG-001", "W7"):
+    for piece in ("falling edge", "done_ok", "done_pulse", "BUG-008", "BUG-001"):
         assert piece in doc, f"CocotbDut docstring 에 {piece!r} 안내가 없다"
 
 

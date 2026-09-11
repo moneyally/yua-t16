@@ -60,6 +60,14 @@ module reg_top #(
   input  logic [31:0]  dr1_cycles,
   output logic         dr1_sat_clr,      // W1C 스트로브
   output logic         dr1_clamp_clr,
+  // DR1 스크래치 창 (0x3_1000..0x3_1FFC). 32비트 워드 하나 = Q1.15 원소 하나.
+  // **읽기는 두 번 한다**: 첫 읽기가 주소를 걸고, 다음 읽기에 데이터가 나온다
+  // (스크래치 읽기 지연 1사이클. 트레이스 창과 같은 구조다).
+  output logic         dr1_scr_en,
+  output logic         dr1_scr_we,
+  output logic [9:0]   dr1_scr_addr,
+  output logic [15:0]  dr1_scr_wdata,
+  input  logic [15:0]  dr1_scr_rdata,
 
   // ── TC0 status (from g2_ctrl_top) ──
   input  logic [31:0]  tc0_runstate,
@@ -147,6 +155,8 @@ module reg_top #(
   localparam logic [19:0] A_DR1_SAT    = 20'h3_0004;
   localparam logic [19:0] A_DR1_CLAMP  = 20'h3_0008;
   localparam logic [19:0] A_DR1_CYCLES = 20'h3_000C;
+  localparam logic [19:0] A_DR1_SCR_BASE = 20'h3_1000;   // 1024 워드 × 4B
+  localparam logic [19:0] A_DR1_SCR_END  = 20'h3_1FFC;
 
   // TC0 0x4_0000 (0x8034_0000 - 0x8030_0000 = 0x40000)
   localparam logic [19:0] A_TC0_RUNSTATE = 20'h4_0000;
@@ -273,6 +283,18 @@ module reg_top #(
   end
 
   // ===============================================================
+  // DR1 스크래치 창 디코드
+  // ===============================================================
+  logic dr1_scr_hit;
+  always_comb begin
+    dr1_scr_hit   = (addr >= A_DR1_SCR_BASE) && (addr <= A_DR1_SCR_END);
+    dr1_scr_addr  = 10'(((32'(addr) - 32'(A_DR1_SCR_BASE)) >> 2));
+    dr1_scr_en    = dr1_scr_hit;
+    dr1_scr_we    = dr1_scr_hit && wr_en;
+    dr1_scr_wdata = wr_data[15:0];
+  end
+
+  // ===============================================================
   // Write strobes
   // ===============================================================
   always_comb begin
@@ -310,7 +332,11 @@ module reg_top #(
   always_comb begin
     rd_data = 32'd0;
 
-    if (trace_win_hit) begin
+    if (dr1_scr_hit) begin
+      // 스크래치는 읽기 지연 1사이클이라 **직전 요청의 데이터**가 보인다.
+      // 호스트는 같은 주소를 두 번 읽는다 (tools/orbit_device.py 가 그렇게 한다).
+      rd_data = {16'd0, dr1_scr_rdata};
+    end else if (trace_win_hit) begin
       rd_data = addr[2] ? trace_rd_data[63:32] : trace_rd_data[31:0];
     end else if (trace_meta_hit) begin
       rd_data = {24'd0, trace_rd_type, 3'd0, trace_rd_fatal};

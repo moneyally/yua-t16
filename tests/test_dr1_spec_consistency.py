@@ -263,18 +263,25 @@ def test_alignment_and_slots_match_spec(spec_text):
 # ---------------------------------------------------------------------------
 # 패커가 스펙대로 채우는지
 # ---------------------------------------------------------------------------
+# W7 에서 스크래치(1024 원소)가 생기면서 주소에 **범위 상한**이 붙었다.
+# 예전 테스트는 0x1000 (원소 2048) 을 썼는데 이제 그것은 범위 밖이다 —
+# 기대값을 바꿔 통과시킨 것이 아니라, 하드웨어에 없던 제약이 새로 생긴 것이다.
+_LAY = M.dr1_scratch_layout(16)
+_Q, _K, _V, _O = (_LAY["q"] * 2, _LAY["k"] * 2, _LAY["v"] * 2, _LAY["o"] * 2)
+
+
 def test_packers_place_fields_at_spec_offsets():
     """기대값 출처: spec/deltarule.md 3.3 — 패킹한 바이트를 오프셋으로 직접 확인."""
     from tools.orbit_desc import crc8, pack_delta_step, unpack_delta_step
 
     d = pack_delta_step(
-        q_addr=0x1000, k_addr=0x1040, v_addr=0x1080, o_addr=0x10C0,
+        q_addr=_Q, k_addr=_K, v_addr=_V, o_addr=_O,
         alpha_uq15=M.UQ15_ONE, beta_uq15=0x4000, slot=0,
     )
     assert len(d) == M.DESC_SIZE
     f = unpack_delta_step(d)
     assert f["opcode"] == int(M.Opcode.DELTA_STEP)
-    assert (f["q_addr"], f["k_addr"], f["v_addr"], f["o_addr"]) == (0x1000, 0x1040, 0x1080, 0x10C0)
+    assert (f["q_addr"], f["k_addr"], f["v_addr"], f["o_addr"]) == (_Q, _K, _V, _O)
     assert f["alpha_uq15"] == 0x8000 and f["beta_uq15"] == 0x4000
     assert crc8(d[: M.DESC_CRC_OFF]) == d[M.DESC_CRC_OFF], "CRC-8 이 기존 규칙과 다르다"
 
@@ -284,11 +291,29 @@ def test_packers_reject_spec_violations():
     from tools.orbit_desc import Dr1FieldError, pack_delta_step
 
     with pytest.raises(Dr1FieldError, match="정렬"):
-        pack_delta_step(0x1001, 0x1040, 0x1080, 0x10C0, M.UQ15_ONE, 0x4000)
+        pack_delta_step(_Q + 1, _K, _V, _O, M.UQ15_ONE, 0x4000)
     with pytest.raises(Dr1FieldError, match="slot"):
-        pack_delta_step(0x1000, 0x1040, 0x1080, 0x10C0, M.UQ15_ONE, 0x4000, slot=M.DR1_NUM_SLOTS)
+        pack_delta_step(_Q, _K, _V, _O, M.UQ15_ONE, 0x4000, slot=M.DR1_NUM_SLOTS)
     with pytest.raises(Dr1FieldError, match="UQ1.15"):
-        pack_delta_step(0x1000, 0x1040, 0x1080, 0x10C0, M.UQ15_ONE + 1, 0x4000)
+        pack_delta_step(_Q, _K, _V, _O, M.UQ15_ONE + 1, 0x4000)
+    # 0x08 DR1_ADDR_RANGE 와 같은 조건을 호스트도 잡는다 (W7 신설)
+    with pytest.raises(Dr1FieldError, match="스크래치"):
+        pack_delta_step((M.DR1_SCRATCH_WORDS - 8) * 2, _K, _V, _O, M.UQ15_ONE, 0x4000)
+
+
+def test_scratch_layout_is_aligned_and_fits():
+    """기대값 출처: spec/deltarule.md 3.6절 — 배치가 정렬·범위 계약을 지키는지."""
+    lay = M.dr1_scratch_layout(16)
+    assert lay["q"] == 0 and lay["k"] == 16 and lay["v"] == 32 and lay["o"] == 48
+    for name, elem in lay.items():
+        assert (elem * 2) % M.DR1_ADDR_ALIGN == 0, f"{name} 이 정렬 위반"
+    assert lay["dump"] + 16 * 16 <= M.DR1_SCRATCH_WORDS
+
+    # **알려진 한계**: 스크래치 1024 원소로는 d=64 의 덤프(64²=4096 원소)가 안 들어간다.
+    # 숨기지 않고 여기서 못 박는다 — d=64 로 확장할 때 스크래치를 먼저 키워야 한다
+    # (필요량 = dump 시작 + d², 최소 4608 원소). docs/DESIGN.md 4절.
+    with pytest.raises(ValueError, match="스크래치"):
+        M.dr1_scratch_layout(64)
 
 
 def test_golden_rejects_undefined_alpha_beta():

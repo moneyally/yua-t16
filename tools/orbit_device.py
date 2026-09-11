@@ -75,7 +75,9 @@ class OrbitDevice:
     """Device HAL — abstracts Backend into device operations."""
 
     # Opcodes actually executable in Proto-A RTL
-    SUPPORTED_OPCODES = {Opcode.NOP, Opcode.GEMM}
+    # DR1 opcode 는 W7 에서 RTL 이 실제로 실행한다 (spec/deltarule.md 2절 구현 상태).
+    SUPPORTED_OPCODES = {Opcode.NOP, Opcode.GEMM,
+                         Opcode.DELTA_INIT, Opcode.DELTA_STEP, Opcode.DELTA_DUMP}
 
     def __init__(self, backend: Backend):
         self._b = backend
@@ -246,3 +248,144 @@ class OrbitDevice:
 
     def read_tile_count(self) -> int:
         return self._b.read(MXU_TILE_COUNT.offset)
+
+    # ═══════════════════════════════════════════════════════════════
+    # ORBIT-DR1 (PLAN W9) — spec/deltarule.md
+    #
+    # **비동기 API 다.** 백엔드가 `async_read`/`async_write` 를 제공해야 한다
+    # (`tools/orbit_cocotb_backend.CocotbBackend`). 동기 백엔드로 부르면
+    # DeviceError 를 낸다 — 조용히 틀리게 도는 것보다 낫다.
+    #
+    # 기대값은 전부 `sim/golden/deltarule.py` 가 준다. 이 HAL 은 값을 계산하지
+    # 않는다 — 넣고, 꺼내고, 완료를 확인할 뿐이다.
+    # ═══════════════════════════════════════════════════════════════
+
+    def _require_async(self):
+        for name in ("async_read", "async_write"):
+            if not hasattr(self._b, name):
+                raise DeviceError(
+                    f"DR1 API 는 비동기 백엔드가 필요하다 (backend.{name} 없음). "
+                    "cocotb 안에서 CocotbBackend 로 쓴다."
+                )
+
+    async def dr1_write_elem(self, elem: int, value: int):
+        """스크래치 원소 하나를 쓴다. value 는 Q1.15 부호 있는 정수."""
+        from tools.orbit_mmio_map import DR1_SCRATCH_BASE, DR1_SCRATCH_WORDS
+        from tools.orbit_pack import to_bits
+
+        if not (0 <= elem < DR1_SCRATCH_WORDS):
+            raise DeviceError(f"스크래치 원소 인덱스 범위 초과: {elem}")
+        off = (DR1_SCRATCH_BASE - BASE) + elem * 4
+        await self._b.async_write(off, to_bits(int(value), 16))
+
+    async def dr1_read_elem(self, elem: int) -> int:
+        """스크래치 원소 하나를 읽는다.
+
+        **두 번 읽는다** — 스크래치 읽기 지연이 1사이클이라 첫 읽기는 주소만 건다
+        (spec/deltarule.md 3.6절). 이걸 빼먹으면 직전 주소의 값을 읽는다.
+        """
+        from tools.orbit_mmio_map import DR1_SCRATCH_BASE, DR1_SCRATCH_WORDS
+        from tools.orbit_pack import from_bits
+
+        if not (0 <= elem < DR1_SCRATCH_WORDS):
+            raise DeviceError(f"스크래치 원소 인덱스 범위 초과: {elem}")
+        off = (DR1_SCRATCH_BASE - BASE) + elem * 4
+        await self._b.async_read(off)
+        raw = await self._b.async_read(off)
+        return from_bits(raw & 0xFFFF, 16)
+
+    async def dr1_write_vec(self, elem: int, vec):
+        for i, x in enumerate(vec):
+            await self.dr1_write_elem(elem + i, int(x))
+
+    async def dr1_read_vec(self, elem: int, n: int) -> list:
+        return [await self.dr1_read_elem(elem + i) for i in range(n)]
+
+    async def _dr1_run(self, desc: bytes, max_polls: int = 4000):
+        """디스크립터를 스테이징+도어벨하고 완료를 기다린다.
+
+        완료 판정은 `docs/DESIGN.md` 5.1 계약대로 **DESC_DONE IRQ** 로 한다.
+        실패는 TC0_FAULT 로 오고, fault_code 를 담아 DeviceError 를 던진다.
+        """
+        from tools.orbit_mmio_map import DESC_STAGE_WORDS
+
+        self._require_async()
+        # 이전 완료 신호를 지우고 시작한다 (안 지우면 남은 비트를 완료로 오인한다)
+        await self._b.async_write(IRQ_PENDING.offset,
+                                  (1 << IrqBit.DESC_DONE) | (1 << IrqBit.TC0_FAULT))
+
+        words = desc_to_words(desc)
+        stage_off = DESC_STAGE_BASE - BASE
+        for i, w in enumerate(words):
+            await self._b.async_write(stage_off + i * 4, w)
+        assert len(words) == DESC_STAGE_WORDS
+        await self._b.async_write(QUEUE_DOORBELLS[0].offset, 0x0001)
+
+        for _ in range(max_polls):
+            pending = await self._b.async_read(IRQ_PENDING.offset)
+            if pending & (1 << IrqBit.TC0_FAULT):
+                code = await self._b.async_read(TC0_FAULT_STATUS.offset)
+                raise DeviceError(
+                    f"DR1 디스크립터 실패: fault_code=0x{code & 0xFF:02X} "
+                    f"(opcode=0x{desc[0]:02X}). spec/deltarule.md 4절 참조"
+                )
+            if pending & (1 << IrqBit.DESC_DONE):
+                return
+        raise DeviceError(f"DR1 디스크립터가 끝나지 않았다 (opcode=0x{desc[0]:02X})")
+
+    async def delta_init(self, slot: int = 0):
+        """DELTA_INIT — 상태 슬롯을 0 으로."""
+        from tools.orbit_desc import pack_delta_init
+
+        await self._dr1_run(pack_delta_init(slot))
+
+    async def delta_step(self, q, k, v, alpha: int, beta: int, slot: int = 0, d: int | None = None):
+        """DELTA_STEP — 토큰 1개. 반환 (o, sat_delta, cycles).
+
+        alpha/beta 는 **UQ1.15** 다 (0x8000 = 1.0).
+        sat_delta 는 이 토큰에서 늘어난 DR1_SAT_COUNT 다 — 골든 step() 의
+        sat_count 와 대응한다.
+        """
+        from tools.orbit_desc import pack_delta_step
+        from tools.orbit_mmio_map import DR1_CYCLES, DR1_SAT_COUNT, dr1_scratch_layout
+
+        self._require_async()
+        d = len(q) if d is None else d
+        lay = dr1_scratch_layout(d)
+
+        sat_before = await self._b.async_read(DR1_SAT_COUNT.offset)
+
+        await self.dr1_write_vec(lay["q"], q)
+        await self.dr1_write_vec(lay["k"], k)
+        await self.dr1_write_vec(lay["v"], v)
+
+        await self._dr1_run(pack_delta_step(
+            q_addr=lay["q"] * 2, k_addr=lay["k"] * 2, v_addr=lay["v"] * 2,
+            o_addr=lay["o"] * 2, alpha_uq15=int(alpha), beta_uq15=int(beta), slot=slot,
+        ))
+
+        o = await self.dr1_read_vec(lay["o"], d)
+        sat_after = await self._b.async_read(DR1_SAT_COUNT.offset)
+        cycles = await self._b.async_read(DR1_CYCLES.offset)
+        return o, sat_after - sat_before, cycles
+
+    async def delta_dump(self, d: int, slot: int = 0):
+        """DELTA_DUMP — 상태 S 전체를 (d, d) 중첩 리스트로. 행 우선."""
+        from tools.orbit_desc import pack_delta_dump
+        from tools.orbit_mmio_map import dr1_scratch_layout
+
+        self._require_async()
+        lay = dr1_scratch_layout(d)
+        await self._dr1_run(pack_delta_dump(lay["dump"] * 2, slot))
+        flat = await self.dr1_read_vec(lay["dump"], d * d)
+        return [flat[r * d:(r + 1) * d] for r in range(d)]
+
+    async def dr1_clear_counters(self):
+        """DR1_SAT_COUNT / DR1_CLAMP_COUNT 를 0 으로 (W1C: 읽은 값을 다시 쓴다)."""
+        from tools.orbit_mmio_map import DR1_CLAMP_COUNT, DR1_SAT_COUNT
+
+        self._require_async()
+        for reg in (DR1_SAT_COUNT, DR1_CLAMP_COUNT):
+            cur = await self._b.async_read(reg.offset)
+            if cur:
+                await self._b.async_write(reg.offset, cur)

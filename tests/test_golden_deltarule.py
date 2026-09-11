@@ -439,3 +439,57 @@ def test_requantize_q15_boundaries():
     arr, flags = requantize_q15(accs)
     assert arr.tolist() == [c[1] for c in cases]
     assert flags.tolist() == [c[2] for c in cases]
+
+# ---------------------------------------------------------------------------
+# UQ1.15 정의역 — **뮤테이션 테스트가 찾아낸 구멍** (scripts/mutation_test.py)
+#
+# `uq15_gate_off` 뮤턴트(범위 검사를 통째로 없앰)가 **살아남았다.** 즉 이 파일이
+# α/β 의 정의역을 전혀 지키지 않고 있었다. spec/deltarule.md 1절이 "1.0 초과는
+# 미정의, 골든은 ValueError" 라고 못박았는데도 골든 자신의 테스트에는 없었다.
+# ---------------------------------------------------------------------------
+def test_uq15_gate_rejects_above_one():
+    """기대값 출처: spec/deltarule.md 1절 — 골든은 1.0 초과를 **거부한다** (클램프 금지)."""
+    from sim.golden.deltarule import UQ15_ONE, check_uq15_gate
+
+    assert check_uq15_gate(UQ15_ONE, "alpha") == UQ15_ONE        # 1.0 은 정의역 안
+    assert check_uq15_gate(0, "beta") == 0
+
+    for bad in (UQ15_ONE + 1, 0xFFFF, 0x9000):
+        with pytest.raises(ValueError, match="0x8000"):
+            check_uq15_gate(bad, "alpha")
+    with pytest.raises(ValueError):
+        check_uq15_gate(-1, "alpha")
+
+
+def test_step_rejects_undefined_alpha_beta():
+    """기대값 출처: spec/deltarule.md 1절 — step() 도 같은 정의역을 지킨다.
+
+    RTL 은 클램프하고 CLAMP_EVENT 를 남긴다. **골든은 클램프하지 않는다** —
+    골든이 조용히 클램프하면 RTL 의 클램프 버그를 영영 못 잡는다.
+    """
+    from sim.golden.deltarule import UQ15_ONE, step
+
+    S = np.zeros((4, 4), dtype=np.int64)
+    z = np.zeros(4, dtype=np.int64)
+    step(S, z, z, z, UQ15_ONE, UQ15_ONE)        # 경계값은 통과해야 한다
+
+    with pytest.raises(ValueError):
+        step(S, z, z, z, UQ15_ONE + 1, UQ15_ONE)
+    with pytest.raises(ValueError):
+        step(S, z, z, z, UQ15_ONE, UQ15_ONE + 1)
+
+
+def test_update_row_and_compute_err_reject_undefined_alpha():
+    """기대값 출처: spec/deltarule.md 1절 — 조각 함수도 같은 문을 지킨다.
+
+    step() 만 막으면 RTL 대응 조각을 직접 부르는 테스트가 정의역 밖으로 샌다.
+    """
+    from sim.golden.deltarule import UQ15_ONE, compute_err, update_row
+
+    z = np.zeros(4, dtype=np.int64)
+    with pytest.raises(ValueError):
+        compute_err(z, z, UQ15_ONE + 1)
+    with pytest.raises(ValueError):
+        update_row(z, UQ15_ONE + 1, UQ15_ONE, 0, z)
+    with pytest.raises(ValueError):
+        update_row(z, UQ15_ONE, UQ15_ONE + 1, 0, z)

@@ -13,6 +13,7 @@ from tools.orbit_mmio_map import (
     DR1_SLOT_OFF, DR1_Q_ADDR_OFF, DR1_K_ADDR_OFF, DR1_O_ADDR_OFF,
     DR1_V_ADDR_OFF, DR1_ALPHA_OFF, DR1_BETA_OFF,
     DR1_NUM_SLOTS, DR1_ADDR_ALIGN, UQ15_ONE,
+    DR1_SCRATCH_WORDS,
 )
 
 
@@ -142,6 +143,22 @@ def _check_uq15(name: str, value: int) -> int:
     return value
 
 
+def _check_range(name: str, addr: int, n_elems: int) -> int:
+    """주소 + 원소 개수가 스크래치 안인지. 하드웨어 fault 0x08 과 같은 조건이다.
+
+    호스트가 먼저 잡는 편이 낫다 — 하드웨어가 잡으면 디스크립터 하나가 통째로
+    실패하고, 원인을 알려면 fault_code 를 읽어야 한다.
+    """
+    first = addr // 2
+    if first + n_elems > DR1_SCRATCH_WORDS:
+        raise Dr1FieldError(
+            f"{name}=0x{addr:X} (원소 {first}) 에서 {n_elems}개를 쓰면 스크래치 "
+            f"{DR1_SCRATCH_WORDS} 원소를 넘는다. "
+            f"하드웨어는 fault_code 0x08 DR1_ADDR_RANGE 를 낸다."
+        )
+    return addr
+
+
 def pack_delta_init(slot: int = 0) -> bytes:
     """DELTA_INIT (0x50): 상태 슬롯을 0 으로."""
     buf = bytearray(DESC_SIZE)
@@ -159,6 +176,7 @@ def pack_delta_step(
     alpha_uq15: int,
     beta_uq15: int,
     slot: int = 0,
+    d: int = 16,
 ) -> bytes:
     """DELTA_STEP (0x51): 토큰 1개.
 
@@ -167,22 +185,27 @@ def pack_delta_step(
     buf = bytearray(DESC_SIZE)
     buf[DESC_OPCODE_OFF] = int(Opcode.DELTA_STEP)
     buf[DR1_SLOT_OFF] = _check_slot(slot)
-    struct.pack_into("<Q", buf, DR1_Q_ADDR_OFF, _check_align("q_addr", q_addr))
-    struct.pack_into("<Q", buf, DR1_K_ADDR_OFF, _check_align("k_addr", k_addr))
-    struct.pack_into("<Q", buf, DR1_O_ADDR_OFF, _check_align("o_addr", o_addr))
-    struct.pack_into("<Q", buf, DR1_V_ADDR_OFF, _check_align("v_addr", v_addr))
+    struct.pack_into("<Q", buf, DR1_Q_ADDR_OFF,
+                     _check_range("q_addr", _check_align("q_addr", q_addr), d))
+    struct.pack_into("<Q", buf, DR1_K_ADDR_OFF,
+                     _check_range("k_addr", _check_align("k_addr", k_addr), d))
+    struct.pack_into("<Q", buf, DR1_O_ADDR_OFF,
+                     _check_range("o_addr", _check_align("o_addr", o_addr), d))
+    struct.pack_into("<Q", buf, DR1_V_ADDR_OFF,
+                     _check_range("v_addr", _check_align("v_addr", v_addr), d))
     struct.pack_into("<H", buf, DR1_ALPHA_OFF, _check_uq15("alpha_uq15", alpha_uq15))
     struct.pack_into("<H", buf, DR1_BETA_OFF, _check_uq15("beta_uq15", beta_uq15))
     buf[DESC_CRC_OFF] = crc8(buf[:DESC_CRC_OFF])
     return bytes(buf)
 
 
-def pack_delta_dump(dst_addr: int, slot: int = 0) -> bytes:
+def pack_delta_dump(dst_addr: int, slot: int = 0, d: int = 16) -> bytes:
     """DELTA_DUMP (0x52): 상태 S 전체를 dst_addr 로."""
     buf = bytearray(DESC_SIZE)
     buf[DESC_OPCODE_OFF] = int(Opcode.DELTA_DUMP)
     buf[DR1_SLOT_OFF] = _check_slot(slot)
-    struct.pack_into("<Q", buf, DR1_O_ADDR_OFF, _check_align("dst_addr", dst_addr))
+    struct.pack_into("<Q", buf, DR1_O_ADDR_OFF,
+                     _check_range("dst_addr", _check_align("dst_addr", dst_addr), d * d))
     buf[DESC_CRC_OFF] = crc8(buf[:DESC_CRC_OFF])
     return bytes(buf)
 

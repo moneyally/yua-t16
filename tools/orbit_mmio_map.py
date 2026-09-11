@@ -260,6 +260,41 @@ DR1_NUM_SLOTS   = 1       # v1. slot != 0 이면 DR1_BAD_SLOT
 DR1_ADDR_ALIGN  = 16      # 바이트. act_sram 데이터 폭 128비트
 UQ15_ONE        = 0x8000  # UQ1.15 에서 1.0 (정확)
 
+# ── DR1 스크래치 (spec/deltarule.md 3.6절) ─────────────────────────
+DR1_SCRATCH_BASE  = 0x8033_1000   # MMIO 창. 32비트 워드 하나 = Q1.15 원소 하나
+DR1_SCRATCH_WORDS = 1024          # 원소 개수 (rtl/dr1/dr1_scratch.sv DEPTH 와 같아야 한다)
+DR1_SCRATCH_END   = DR1_SCRATCH_BASE + DR1_SCRATCH_WORDS * 4 - 4
+DR1_DUMP_ELEM     = 512           # DELTA_DUMP 기본 목적지 (원소 인덱스)
+
+
+def dr1_scratch_layout(d: int) -> dict:
+    """DR1 스크래치의 표준 배치. **단일 출처** (spec/deltarule.md 3.6절).
+
+    테스트벤치(`tb/tb_dr1_top.py` CocotbDut)와 호스트 HAL(`tools/orbit_device.py`)이
+    둘 다 이 함수만 쓴다. 배치가 두 곳에 있으면 한쪽을 고칠 때 다른 쪽이 조용히 틀린다.
+
+    반환값은 **원소 인덱스**다. 바이트 주소는 ×2.
+    모든 벡터 시작점은 16바이트 정렬이어야 한다 (= 원소 인덱스가 8의 배수).
+    """
+    layout = {
+        "q": 0,
+        "k": d,
+        "v": 2 * d,
+        "o": 3 * d,
+        "dump": DR1_DUMP_ELEM,
+    }
+    for name, elem in layout.items():
+        if (elem * 2) % DR1_ADDR_ALIGN != 0:
+            raise ValueError(
+                f"d={d} 에서 {name} 시작 원소 {elem} (바이트 {elem*2}) 가 "
+                f"{DR1_ADDR_ALIGN}바이트 정렬이 아니다 — 하드웨어가 0x06 을 낸다"
+            )
+    if layout["o"] + d > DR1_SCRATCH_WORDS or layout["dump"] + d * d > DR1_SCRATCH_WORDS:
+        raise ValueError(f"d={d} 는 스크래치 {DR1_SCRATCH_WORDS} 원소에 들어가지 않는다")
+    return layout
+
+
+
 # Opcodes
 class Opcode(IntEnum):
     NOP    = 0x01
@@ -287,6 +322,7 @@ class FaultCode(IntEnum):
     DR1_BAD_SLOT   = 0x05
     DR1_UNALIGNED  = 0x06
     DR1_UNIMPL     = 0x07
+    DR1_ADDR_RANGE = 0x08
 
 # ═══════════════════════════════════════════════════════════════════
 # Trace entry format (RTL-derived from g2_ctrl_top.sv)

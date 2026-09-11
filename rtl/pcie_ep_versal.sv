@@ -18,9 +18,12 @@
 //   MSI-X request/ack
 //   Link/reset status
 //
-// For Proto-B skeleton: CPM AXI-Stream ports are stubs.
-// The actual CQ→BAR decode + CC generation will be implemented
-// when Vivado CPM IP is generated and ports are finalized.
+// 현재 상태 (2026-09-11):
+//   - CQ→BAR 디코드와 CC 생성은 **구현되지 않았다.** CPM IP 의 tdata/tuser
+//     레이아웃을 확인한 뒤에 쓴다 (PG347). 추측으로 쓰지 않는다.
+//   - 다만 모든 출력은 **정의된 값으로 구동된다** (undriven X 없음).
+//     그래서 `scripts/synth_gate.sh` STAGE 1 의 known-incomplete 목록에서 빠졌다.
+//   - **PCIe 는 여전히 동작하지 않는다.** 호스트와 통신한 적 없다.
 `timescale 1ns/1ps
 `default_nettype none
 
@@ -171,6 +174,39 @@ module pcie_ep_versal #(
 
   // RC: accept and discard
   assign m_axis_rc_tready = 1'b1;
+
+  // ═══════════════════════════════════════════════════════════
+  // BAR 요청 포트 — **정의된 비활성 값으로 구동한다** (undriven 이 아니다)
+  // ═══════════════════════════════════════════════════════════
+  // 여기가 원래 `check -assert` 에서 171건을 내던 자리다. 출력이 아무 데서도
+  // 구동되지 않아 X 로 남았고, 그것을 인스턴스화하는 `g2_protob_top` 까지
+  // 게이트의 known-incomplete 목록에 올라 있었다.
+  //
+  // **CQ→BAR 디코드는 여전히 구현돼 있지 않다.** CPM 의 CQ tdata/tuser 레이아웃
+  // (PG347)을 확인하지 않고 TLP 파서를 쓰면 그건 추측이다 (CLAUDE.md 규칙 7).
+  // 확인할 수 있게 되면 여기를 채운다.
+  //
+  // 그때까지 **X 로 두지 않고 비활성으로 묶는다.** 이유:
+  //   - 합성에서 X 는 도구가 임의로 접는다 (BUG-006 과 같은 종류의 위험)
+  //   - 시뮬레이션에서 X 가 downstream 으로 번지면 원인 추적이 어려워진다
+  //   - "요청이 없다" 는 것은 실제로 지금 맞는 동작이다
+  assign bar0_req_valid = 1'b0;
+  assign bar0_req_addr  = 20'd0;
+  assign bar0_req_wr    = 1'b0;
+  assign bar0_req_wdata = 32'd0;
+  assign bar0_req_be    = 4'd0;
+
+  assign bar2_req_valid = 1'b0;
+  assign bar2_req_addr  = 21'd0;
+  assign bar2_req_wr    = 1'b0;
+  assign bar2_req_wdata = 32'd0;
+  assign bar2_req_be    = 4'd0;
+
+  assign bar4_req_valid = 1'b0;
+  assign bar4_req_addr  = 16'd0;
+  assign bar4_req_wr    = 1'b0;
+  assign bar4_req_wdata = 32'd0;
+  assign bar4_req_be    = 4'd0;
 
   // ═══════════════════════════════════════════════════════════
   // MSI-X generation (simplified)

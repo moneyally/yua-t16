@@ -24,15 +24,23 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from tools.orbit_desc import crc8, pack_delta_dump, pack_delta_init  # noqa: E402
+from tools.orbit_desc import (  # noqa: E402
+    Dr1FieldError,
+    crc8,
+    pack_delta_dump,
+    pack_delta_init,
+    pack_delta_step,
+)
 from tools.orbit_mmio_map import (  # noqa: E402
     BASE,
+    dr1_scratch_layout,
     DESC_SIZE,
     DESC_STAGE_BASE,
     DESC_STAGE_WORDS,
     DR1_CLAMP_COUNT,
     DR1_CYCLES,
     DR1_SAT_COUNT,
+    DR1_SCRATCH_WORDS,
     DR1_SLOT_OFF,
     DR1_STATUS,
     IRQ_MASK,
@@ -59,6 +67,10 @@ A_DR1_CYCLES = DR1_CYCLES.addr - BASE
 BIT_DESC_DONE = 1 << IrqBit.DESC_DONE
 BIT_TC0_FAULT = 1 << IrqBit.TC0_FAULT
 
+# 스크래치 배치는 spec/deltarule.md 3.6절의 단일 출처에서 온다
+LAY = dr1_scratch_layout(16)
+DUMP_ADDR = LAY["dump"] * 2
+
 
 def force_slot(desc: bytes, slot: int) -> list:
     """호스트 패커의 슬롯 검사를 우회해서 잘못된 슬롯을 박아 넣는다.
@@ -76,6 +88,15 @@ def force_slot(desc: bytes, slot: int) -> list:
 def force_opcode(desc: bytes, opcode: int) -> list:
     d = list(desc)
     d[0] = opcode & 0xFF
+    d[DESC_SIZE - 1] = crc8(d[: DESC_SIZE - 1])
+    return d
+
+
+def force_qaddr(desc: bytes, addr: int) -> list:
+    """q_addr(바이트 16) 을 호스트 검사를 우회해 바꿔 넣는다."""
+    d = list(desc)
+    for i in range(8):
+        d[16 + i] = (addr >> (8 * i)) & 0xFF
     d[DESC_SIZE - 1] = crc8(d[: DESC_SIZE - 1])
     return d
 
@@ -173,7 +194,8 @@ async def test_d2_delta_dump_completes(dut):
 
     await run_descriptor(dut, pack_delta_init(slot=0))
     await reg_write(dut, A_IRQ_PENDING, 0xFFFF_FFFF)      # W1C 로 지우고 다시 본다
-    pending, fault = await run_descriptor(dut, pack_delta_dump(0x2000, slot=0))
+    # DUMP 는 d행 × (d원소 쓰기) 라 약 305 사이클이다 (F2 실측). 기본 settle 로는 모자란다.
+    pending, fault = await run_descriptor(dut, pack_delta_dump(DUMP_ADDR, slot=0), settle=800)
     dut._log.info(f"D2 DELTA_DUMP IRQ={describe(pending)} TC0_FAULT={fault:#010x}")
     assert pending & BIT_DESC_DONE, f"D2: DESC_DONE 이 없다 {describe(pending)}"
     assert not (pending & BIT_TC0_FAULT), f"D2: fault 가 떴다 {describe(pending)}"
@@ -209,7 +231,7 @@ async def test_d4_unaligned_dump_never_raises_desc_done(dut):
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
 
-    desc = force_dst(pack_delta_dump(0x2000, slot=0), 0x2008)   # 8바이트 정렬 = 미정렬
+    desc = force_dst(pack_delta_dump(DUMP_ADDR, slot=0), 0x2008)   # 8바이트 정렬 = 미정렬
     pending, fault = await run_descriptor(dut, desc)
     dut._log.info(f"D4 미정렬 IRQ={describe(pending)} TC0_FAULT={fault:#010x}")
 
@@ -223,26 +245,70 @@ async def test_d4_unaligned_dump_never_raises_desc_done(dut):
 
 
 @cocotb.test()
-async def test_d5_delta_step_is_rejected_this_week(dut):
-    """D5: DELTA_STEP(0x51) 은 W6 에 없다 → ILLEGAL_OPCODE, DESC_DONE 없음.
+async def test_d5_delta_step_completes_end_to_end(dut):
+    """D5: **DELTA_STEP 이 디스크립터 경로로 끝까지 돈다** (W7).
 
-    desc_fsm_v2 의 유효 opcode 목록에 0x51 을 **일부러 넣지 않았다**
-    (spec/deltarule.md 2절 "구현 상태"). 조용히 통과시키는 것보다 낫다.
+    W6 에서는 이 자리에 "0x51 은 desc_fsm_v2 가 ILLEGAL_OPCODE 로 막는다" 가
+    있었다. W7 에서 계산 경로가 생겨서 **검사 대상이 바뀌었다** — 기대값을
+    고쳐 통과시킨 것이 아니다.
+
+    여기서는 완료 계약만 본다 (DESC_DONE 뜨고 TC0_FAULT 없음).
+    값이 골든과 맞는지는 tb/tb_dr1_harness_rtl.py 와 tb/tb_dr1_host_e2e.py 가 본다.
     """
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_dut(dut)
 
-    desc = force_opcode(pack_delta_init(slot=0), int(Opcode.DELTA_STEP))
-    pending, fault = await run_descriptor(dut, desc)
+    await run_descriptor(dut, pack_delta_init(slot=0))
+    await reg_write(dut, A_IRQ_PENDING, 0xFFFF_FFFF)
+
+    desc = pack_delta_step(
+        q_addr=LAY["q"] * 2, k_addr=LAY["k"] * 2, v_addr=LAY["v"] * 2,
+        o_addr=LAY["o"] * 2, alpha_uq15=0x8000, beta_uq15=0x4000, slot=0,
+    )
+    pending, fault = await run_descriptor(dut, desc, settle=600)
     dut._log.info(f"D5 STEP IRQ={describe(pending)} TC0_FAULT={fault:#010x}")
 
-    assert pending & BIT_TC0_FAULT, f"D5: TC0_FAULT 가 없다 {describe(pending)}"
-    assert (fault & 0xFF) == int(FaultCode.ILLEGAL_OPCODE), (
-        f"D5: fault_code={fault & 0xFF:#04x} (W6 에서는 desc_fsm_v2 가 먼저 막는다)"
+    assert pending & BIT_DESC_DONE, f"D5: STEP 이 완료되지 않았다 {describe(pending)}"
+    assert not (pending & BIT_TC0_FAULT), (
+        f"D5: STEP 이 fault 를 냈다 TC0_FAULT={fault:#010x} {describe(pending)}"
     )
-    assert not (pending & BIT_DESC_DONE), (
-        f"D5 위반 — 구현 안 된 opcode 에 DESC_DONE 이 떴다 {describe(pending)}"
+
+
+@cocotb.test()
+async def test_d5b_step_with_bad_addr_still_faults(dut):
+    """D5b: STEP 이 동작해도 **잘못된 주소는 여전히 막는다** (0x08 DR1_ADDR_RANGE).
+
+    경로가 열렸다고 검사가 느슨해지면 안 된다.
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset_dut(dut)
+
+    # 호스트 패커가 먼저 잡는다 — 그것부터 확인한다
+    try:
+        pack_delta_step(
+            q_addr=(DR1_SCRATCH_WORDS - 8) * 2, k_addr=LAY["k"] * 2, v_addr=LAY["v"] * 2,
+            o_addr=LAY["o"] * 2, alpha_uq15=0x8000, beta_uq15=0, slot=0,
+        )
+    except Dr1FieldError:
+        pass
+    else:
+        raise AssertionError("D5b: 호스트 패커가 범위 초과를 안 잡았다")
+
+    # 호스트를 우회해서 하드웨어가 잡는지 본다
+    desc = force_qaddr(
+        pack_delta_step(
+            q_addr=LAY["q"] * 2, k_addr=LAY["k"] * 2, v_addr=LAY["v"] * 2,
+            o_addr=LAY["o"] * 2, alpha_uq15=0x8000, beta_uq15=0, slot=0,
+        ),
+        (DR1_SCRATCH_WORDS - 8) * 2,
     )
+    pending, fault = await run_descriptor(dut, desc)
+    dut._log.info(f"D5b 범위초과 IRQ={describe(pending)} TC0_FAULT={fault:#010x}")
+    assert pending & BIT_TC0_FAULT, f"D5b: TC0_FAULT 가 없다 {describe(pending)}"
+    assert (fault & 0xFF) == int(FaultCode.DR1_ADDR_RANGE), (
+        f"D5b: fault_code={fault & 0xFF:#04x}"
+    )
+    assert not (pending & BIT_DESC_DONE), f"D5b: 실패인데 DESC_DONE 이 떴다 {describe(pending)}"
 
 
 @cocotb.test()

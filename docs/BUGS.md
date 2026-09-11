@@ -485,3 +485,131 @@ verilator/cocotb 조합의 문제인지 테스트 구조 문제인지 아직 가
 
 *다음 후보 (아직 재현 안 함)*: `docs/AUDIT.md` §4 의 `core_done_seen` 클리어 조건
 (`rtl/desc_fsm_v2.sv:171` — `ST_IDLE`/`ST_DISPATCH` 에서만 클리어). BUG-001 을 고친 뒤에 본다.
+
+---
+
+## BUG-009 — `dr1_top` 이 갱신에 **이전 행**의 상태를 썼다 (2026-09-11 수정됨, W7)
+
+**상태**: **수정 완료.**
+**발견**: `tb/tb_dr1_harness_rtl.py` R5 (10토큰). **1토큰 테스트로는 못 잡는다.**
+**심각도**: 높음. 두 번째 토큰부터 상태가 통째로 틀렸다.
+
+### 증상
+
+`DELTA_STEP` 이 **토큰 0 은 골든과 비트 일치하는데 토큰 1부터 어긋났다.**
+
+```
+$ python3 tb/run_tb.py dr1_tb_wrap tb_dr1_harness_rtl <소스들>
+DR1 harness  d=16  N=1   seed=1  → PASS
+DR1 harness  d=16  N=10  seed=2  → FAIL (400 mismatches)
+  [MISMATCH] token=    1  o[0]  expected=0x001F (+31)  actual=0x0019 (+25)  diff=-6
+  [MISMATCH] token=    1  o[1]  expected=0x001C (+28)  actual=0x0017 (+23)  diff=-5
+```
+
+### 원인
+
+`dr1_top` 이 `state_sram` 에서 읽은 행을 `s_row_hold` 레지스터에 담아
+`update_unit` 에 주고 있었다:
+
+```systemverilog
+update_unit u_upd ( ..., .s_row_flat(s_row_hold), ... );   // ← 틀렸다
+...
+ST_UPD_START: s_row_hold <= sram_rd_data;   // 같은 edge 에 등록된다
+```
+
+`update_unit` 은 `start` 를 받는 사이클(= `ST_UPD_START`)에 `s_row_flat` 을 래치한다.
+그런데 `s_row_hold` 는 **그 사이클이 끝나는 edge 에** 갱신된다. 즉 `update_unit` 이
+보는 값은 언제나 **직전 행**이다.
+
+**왜 첫 토큰만 통과했는가**: `DELTA_INIT` 직후 상태가 전부 0 이라, 이전 행도 0 이고
+현재 행도 0 이다. 값이 같아서 어긋난 것이 안 보인다. 토큰 1 부터 상태가 0 이 아니라서
+드러났다.
+
+### 교훈
+
+**"1토큰 비트 일치"는 통과 기준이 될 수 없다.** 초기 상태가 0 이면 상태 경로의 버그가
+숨는다. `docs/PLAN.md` W7 이 "1 → 10 → 100토큰" 을 요구한 이유가 이것이다.
+
+### 수정
+
+레지스터를 없애고 `state_sram` 의 읽기 데이터를 그대로 물렸다.
+
+```systemverilog
+.s_row_flat(sram_rd_data),
+```
+
+읽기 지연이 1사이클이므로 `ST_UPD_RD` 에서 요청한 행이 `ST_UPD_START` 에 도착해 있다 —
+레지스터를 하나 더 두는 것이 오히려 틀렸다.
+
+### 검증
+
+```
+DR1 harness  d=16  N=1     seed=1  → PASS
+DR1 harness  d=16  N=10    seed=2  → PASS
+DR1 harness  d=16  N=100   seed=3  → PASS
+DR1 harness  d=16  N=1000  seed=1,2,3 → PASS   (R9)
+R7: 포화 496회까지 일치
+```
+
+---
+
+## BUG-010 — 포트 연결식의 `$signed()` 가 yosys 를 죽인다 (2026-09-11 회피)
+
+**상태**: **회피 완료** (RTL 을 바꿔서 통과). yosys 쪽 문제이지 설계 결함이 아니다.
+**발견**: `scripts/synth_gate.sh` STAGE 2.
+
+### 증상
+
+`dr1_top` / `g2_ctrl_top` / `g2_protob_top` 합성이 내부 assert 로 죽었다.
+
+```
+FAIL    dr1_top    ERROR: Assert `arg->is_signed == sig.as_wire()->is_signed' failed in f
+```
+
+린트(verilator 5.034)와 시뮬레이션(iverilog)은 **둘 다 통과**했다. 게이트만 죽었다.
+
+### 원인
+
+모듈 인스턴스의 포트 연결식에 부호 변환을 직접 쓴 것:
+
+```systemverilog
+update_unit u_upd ( ..., .err_i($signed(err_r[upd_idx[AW-1:0]*W +: W])), ... );
+```
+
+sv2v 가 이것을 Verilog-2005 로 낮출 때 만드는 형태를 yosys 0.33 프론트엔드가
+처리하지 못한다 (부호 속성이 wire 와 어긋난다고 판단한다).
+
+### 수정
+
+중간 wire 로 빼면 통과한다. 의미는 같다.
+
+```systemverilog
+wire signed [W-1:0] err_sel = $signed(err_r[upd_idx[AW-1:0]*W +: W]);
+...
+.err_i(err_sel),
+```
+
+```
+ok  dr1_top  42s  cells(design total)=124461
+```
+
+### 교훈
+
+**린트와 시뮬레이션이 통과해도 합성 게이트를 대신하지 못한다.**
+`mac_array` 의 unpacked array 포트(sv2v 도입 사유)와 같은 계열이다 —
+합법 SystemVerilog 인데 도구가 못 받는 경우. 규칙은 그대로다: **게이트가 정답이다.**
+
+---
+
+## 테스트벤치 쪽 실수 기록 (RTL 버그가 아님)
+
+RTL 이 아니라 **테스트가 틀렸던** 경우다. 같은 실수를 또 하지 않으려고 남긴다.
+
+| 언제 | 무엇 | 왜 |
+|---|---|---|
+| W6 | `CocotbDut._issue` 가 명령을 통째로 잃었다 | `cmd_valid` 를 1사이클만 내고 `cmd_ready` 를 안 봤다. 앞 명령이 `ST_DONE_OK` 에 있는 동안 ready=0 이라 씹혔다 |
+| W7 | `tb_dr1_top_fsm.issue()` 가 디스크립터를 **두 번** 실행했다 | valid 를 올린 뒤 `FallingEdge` 를 기다리는 사이 rising edge 가 이미 수락했다. 클램프 카운트가 2 대신 4 로 나와서 들켰다 |
+| W11 | `tb_axil_reg_bridge` 가 AW/W VALID 를 안 내렸다 | `RisingEdge` **직후**에 ready 를 봤다. 그 시점엔 이미 상태가 바뀌어 ready=0 이라 VALID 가 계속 걸려 있었다 |
+
+셋 다 원인이 같다: **등록된 신호를 rising edge 직후에 읽었다.**
+규칙은 `docs/BUGS.md` BUG-008a/b 에서 이미 나왔다 — **falling edge 에서 샘플링한다.**

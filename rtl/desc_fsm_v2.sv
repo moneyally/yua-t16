@@ -169,12 +169,12 @@ module desc_fsm_v2 #(
   // ---------------------------------------------------------------
   // Opcode validation
   // ---------------------------------------------------------------
-  // 0x50 DELTA_INIT / 0x52 DELTA_DUMP 는 dr1_top 이 처리한다 (spec/deltarule.md 2절).
-  // **0x51 DELTA_STEP 은 일부러 빠져 있다** — 계산 경로가 W7 이라 지금 받으면
-  // 조용히 아무것도 안 하게 된다. 여기서 ILLEGAL_OPCODE 로 막는 편이 낫다.
+  // 0x50 DELTA_INIT / 0x51 DELTA_STEP / 0x52 DELTA_DUMP 는 dr1_top 이 처리한다
+  // (spec/deltarule.md 2절). W6 까지는 0x51 을 일부러 뺐었다 — 계산 경로가 없어서
+  // 조용히 아무것도 안 하게 되기 때문이다. **W7 에서 구현되어 이제 받는다.**
   function automatic logic opcode_valid(input logic [7:0] op);
     opcode_valid = (op == 8'h01) || (op == 8'h02) || (op == 8'h03) || (op == 8'h04)
-                || (op == 8'h50) || (op == 8'h52);
+                || (op == 8'h50) || (op == 8'h51) || (op == 8'h52);
   endfunction
 
   // ---------------------------------------------------------------

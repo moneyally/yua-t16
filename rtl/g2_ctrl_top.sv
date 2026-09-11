@@ -113,6 +113,9 @@ module g2_ctrl_top #(
   // ── DR1 (델타룰 헤드) 전방 선언 ──
   logic [31:0] dr1_status, dr1_sat_count, dr1_clamp_count, dr1_cycles;
   logic        dr1_sat_clr, dr1_clamp_clr;
+  logic        dr1_scr_en, dr1_scr_we;
+  logic [9:0]  dr1_scr_addr;
+  logic [15:0] dr1_scr_wdata, dr1_scr_rdata;
 
   // ===============================================================
   // Register Bank
@@ -134,6 +137,8 @@ module g2_ctrl_top #(
     .dr1_status(dr1_status), .dr1_sat_count(dr1_sat_count),
     .dr1_clamp_count(dr1_clamp_count), .dr1_cycles(dr1_cycles),
     .dr1_sat_clr(dr1_sat_clr), .dr1_clamp_clr(dr1_clamp_clr),
+    .dr1_scr_en(dr1_scr_en), .dr1_scr_we(dr1_scr_we), .dr1_scr_addr(dr1_scr_addr),
+    .dr1_scr_wdata(dr1_scr_wdata), .dr1_scr_rdata(dr1_scr_rdata),
     .tc0_runstate(tc0_runstate_val), .tc0_fault_status(tc0_fault_status_val),
     .tc0_perf_cycles(tc0_perf_cycles_val), .tc0_desc_ptr(tc0_desc_ptr_val),
     .tc0_enable(tc0_enable), .tc0_halt(tc0_halt), .tc0_fault_clr(tc0_fault_clr),
@@ -269,19 +274,31 @@ module g2_ctrl_top #(
 
   // DR1 명령/완료
   localparam int DR1_D = 16;                 // docs/DESIGN.md 4절: v1 은 d=16 부터
+  localparam int DR1_SCRATCH = 1024;         // dr1_scratch 원소 개수
   logic dr1_cmd_valid, dr1_cmd_ready;
   logic dr1_busy, dr1_done_ok, dr1_done_err, dr1_done_pulse;
   logic [7:0] dr1_fault_code;
   logic dr1_dump_valid;
   logic [$clog2(DR1_D)-1:0] dr1_dump_row;
   logic [DR1_D*16-1:0]      dr1_dump_data;
+  logic dr1_sat_event, dr1_clamp_event;
+  logic dr1_scr_rd_en, dr1_scr_wr_en;
+  logic [$clog2(DR1_SCRATCH)-1:0] dr1_scr_rd_addr, dr1_scr_wr_addr;
+  logic [15:0] dr1_scr_rd_data, dr1_scr_wr_data;
+
+  // 디스크립터에서 DR1 전용 필드를 뽑는다 (spec/deltarule.md 3.3절).
+  // desc_fsm_v2 의 기존 필드 추출은 건드리지 않는다 — 여기서 원시 바이트를 읽는다.
+  wire [63:0] dr1_v_addr = {desc_hold[51], desc_hold[50], desc_hold[49], desc_hold[48],
+                            desc_hold[47], desc_hold[46], desc_hold[45], desc_hold[44]};
+  wire [15:0] dr1_alpha  = {desc_hold[53], desc_hold[52]};
+  wire [15:0] dr1_beta   = {desc_hold[55], desc_hold[54]};
   logic [31:0] gemm_perf_cycles, gemm_perf_bytes;
 
   assign gemm_desc_valid = fsm_cmd_valid && (fsm_cmd_opcode == 8'h02);
 
-  // DR1 (spec/deltarule.md 2절): 0x50 INIT, 0x52 DUMP.
-  // 0x51 STEP 은 desc_fsm_v2 의 유효 opcode 가 아니라 여기까지 오지 않는다 (W7).
-  wire fsm_opcode_is_dr1 = (fsm_cmd_opcode == 8'h50) || (fsm_cmd_opcode == 8'h52);
+  // DR1 (spec/deltarule.md 2절): 0x50 INIT, 0x51 STEP, 0x52 DUMP — W7 에서 셋 다 동작한다.
+  wire fsm_opcode_is_dr1 = (fsm_cmd_opcode == 8'h50) || (fsm_cmd_opcode == 8'h51)
+                        || (fsm_cmd_opcode == 8'h52);
   assign dr1_cmd_valid   = fsm_cmd_valid && fsm_opcode_is_dr1;
 
   // cmd_ready 는 목적지에 따라 갈라진다. DR1 이 아닌 opcode 의 동작은 예전과 같다.
@@ -310,26 +327,40 @@ module g2_ctrl_top #(
   //
   // dump 스트림은 아직 어디에도 안 붙는다. 스크래치 쓰기 경로는 W7~W8 이고,
   // 지금 붙이는 척하면 "썼다" 는 거짓말이 된다. 포트는 열어 두고 비워 둔다.
-  dr1_top #(.D(DR1_D), .W(16), .NUM_SLOTS(1)) u_dr1 (
+  dr1_top #(.D(DR1_D), .W(16), .NUM_SLOTS(1), .SCRATCH(DR1_SCRATCH)) u_dr1 (
     .clk(clk), .rst_n(rst_n),
     .cmd_valid(dr1_cmd_valid), .cmd_ready(dr1_cmd_ready),
     .cmd_opcode(fsm_cmd_opcode),
     .cmd_slot(desc_hold[1]),
-    .cmd_dst_addr(fsm_out_addr),
+    .cmd_q_addr(fsm_act_addr), .cmd_k_addr(fsm_wgt_addr),
+    .cmd_dst_addr(fsm_out_addr), .cmd_v_addr(dr1_v_addr),
+    .cmd_alpha(dr1_alpha), .cmd_beta(dr1_beta),
+    .scr_rd_en(dr1_scr_rd_en), .scr_rd_addr(dr1_scr_rd_addr), .scr_rd_data(dr1_scr_rd_data),
+    .scr_wr_en(dr1_scr_wr_en), .scr_wr_addr(dr1_scr_wr_addr), .scr_wr_data(dr1_scr_wr_data),
     .dump_valid(dr1_dump_valid), .dump_row(dr1_dump_row), .dump_data(dr1_dump_data),
     .busy(dr1_busy),
     .done_ok(dr1_done_ok), .done_err(dr1_done_err), .done_pulse(dr1_done_pulse),
     .fault_code(dr1_fault_code),
+    .sat_event(dr1_sat_event), .clamp_event(dr1_clamp_event),
     .dr1_status(dr1_status), .dr1_sat_count(dr1_sat_count),
     .dr1_clamp_count(dr1_clamp_count), .dr1_cycles(dr1_cycles),
     .sat_count_clr(dr1_sat_clr), .clamp_count_clr(dr1_clamp_clr)
+  );
+
+  // 벡터 스크래치. 호스트는 MMIO 창(0x8033_1000)으로, DR1 은 전용 포트로 쓴다.
+  dr1_scratch #(.DEPTH(DR1_SCRATCH), .W(16)) u_dr1_scratch (
+    .clk(clk), .rst_n(rst_n),
+    .h_en(dr1_scr_en), .h_we(dr1_scr_we), .h_addr(dr1_scr_addr),
+    .h_wdata(dr1_scr_wdata), .h_rdata(dr1_scr_rdata),
+    .d_rd_en(dr1_scr_rd_en), .d_rd_addr(dr1_scr_rd_addr), .d_rd_data(dr1_scr_rd_data),
+    .d_wr_en(dr1_scr_wr_en), .d_wr_addr(dr1_scr_wr_addr), .d_wr_data(dr1_scr_wr_data)
   );
 
   // 아직 쓰지 않는 DR1 출력들. 이 파일은 맨 위에서 UNUSEDSIGNAL 을 끄고 있으므로
   // 여기서 lint_on 을 쓰면 **파일 전체의 면제가 풀린다** — 그래서 프라그마 없이
   // 의도만 남긴다. W7 에서 dump 스트림이 스크래치 쓰기 경로로 간다.
   wire _unused_dr1 = &{1'b0, dr1_dump_valid, dr1_dump_row, dr1_dump_data,
-                       dr1_busy, dr1_done_pulse, 1'b0};
+                       dr1_busy, dr1_done_pulse, 1'b0};   // 덤프 스트림은 스크래치 쓰기로 대체됨
 
   // ===============================================================
   // TC0 RUNSTATE / FAULT_STATUS (REG_SPEC section 7)
@@ -472,6 +503,8 @@ module g2_ctrl_top #(
   localparam logic [3:0] TEVT_DONE     = 4'd2;
   localparam logic [3:0] TEVT_FAULT    = 4'd3;
   localparam logic [3:0] TEVT_OVERFLOW = 4'd4;
+  localparam logic [3:0] TEVT_SAT       = 4'd5;   // spec/deltarule.md 5.2절
+  localparam logic [3:0] TEVT_CLAMP     = 4'd6;
 
   always_comb begin
     trace_valid = 1'b0; trace_type = 4'd0; trace_fatal_flag = 1'b0; trace_payload = 64'd0;
@@ -487,6 +520,13 @@ module g2_ctrl_top #(
     end else if (any_overflow) begin
       trace_valid = 1'b1; trace_type = TEVT_OVERFLOW; trace_fatal_flag = 1'b1;
       trace_payload = {60'd0, overflow_flags};
+    end else if (dr1_clamp_event) begin
+      // 클램프가 포화보다 앞이다 — 호스트 버그(α>1)가 더 급한 신호다
+      trace_valid = 1'b1; trace_type = TEVT_CLAMP;
+      trace_payload = {32'd0, dr1_clamp_count};
+    end else if (dr1_sat_event) begin
+      trace_valid = 1'b1; trace_type = TEVT_SAT;
+      trace_payload = {32'd0, dr1_sat_count};
     end
   end
 

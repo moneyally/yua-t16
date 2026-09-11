@@ -69,9 +69,11 @@ JOBS="${JOBS:-4}"
 # 숨기는 것이 아니다. 목록에 넣을 때는 반드시 (1) 왜 미완성인지 (2) 어느 문서에
 # 근거가 있는지를 함께 적는다. 근거 없이 추가하지 말 것.
 # -----------------------------------------------------------------------------
+# 2026-09-11: pcie_ep_versal 의 BAR 요청 출력을 **정의된 비활성 값으로 구동**해서
+# 두 모듈 다 목록에서 뺐다 (check -assert 171건 -> 0건). CQ->BAR 디코드는 여전히
+# 구현되지 않았고 PCIe 는 동작하지 않는다 — 그건 rtl/pcie_ep_versal.sv 헤더와
+# README 상태표에 적혀 있다. 여기는 "게이트가 못 보는 것" 목록이지 "미구현" 목록이 아니다.
 declare -A KNOWN_INCOMPLETE=(
-  [pcie_ep_versal]="CPM AXI-Stream 포트가 스텁 — BAR 요청 출력이 undriven (CLAUDE.md 2절, docs/AUDIT.md §5 #16). PCIe 실동작은 docs/DESIGN.md 10절에서 범위 밖."
-  [g2_protob_top]="pcie_ep_versal 을 인스턴스화하므로 같은 undriven 포트를 물려받는다."
 )
 
 STAGE1_ONLY=0

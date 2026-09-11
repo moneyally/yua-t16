@@ -220,24 +220,28 @@ class GoldenDut(Dr1Dut):
 
 
 class CocotbDut(Dr1Dut):
-    """RTL DUT — **`rtl/dr1/dr1_top.sv` 를 직접 몬다** (PLAN W6).
+    """RTL DUT — **`rtl/dr1/dr1_tb_wrap.sv`** (dr1_top + dr1_scratch) 를 직접 몬다.
 
     ───────────────────────────────────────────────────────────────────────
-    W6 에서 채운 것 / 아직 빈 것
+    구현 상태 (PLAN W7)
     ───────────────────────────────────────────────────────────────────────
-      init  ✔  DELTA_INIT (0x50)  — 구현됨
-      dump  ✔  DELTA_DUMP (0x52)  — 구현됨, 덤프 스트림을 받아 (d,d) 로 되돌린다
-      step  ✘  DELTA_STEP (0x51)  — **W7**. 지금 부르면 NotImplementedError.
-                                     RTL 은 fault_code 0x07(DR1_UNIMPL)로 실패한다.
+      init  ✔  DELTA_INIT (0x50)
+      step  ✔  DELTA_STEP (0x51) — 스크래치에 q/k/v 를 넣고, o 를 꺼낸다
+      dump  ✔  DELTA_DUMP (0x52) — **스크래치에서** 읽는다 (스펙 경로).
+               스트림 포트(dump_valid)는 따로 tb 가 본다.
 
     ───────────────────────────────────────────────────────────────────────
-    왜 dr1_top 이고 g2_ctrl_top 이 아닌가
+    스크래치 배치 (테스트가 정한다 — 하드웨어는 주소만 받는다)
     ───────────────────────────────────────────────────────────────────────
-    W6 의 덤프는 **스트림 포트**로만 나온다. 스크래치 메모리 쓰기 경로가 아직
-    없어서 `g2_ctrl_top` 바깥에서는 상태를 볼 수 없다 (spec/deltarule.md 3.4절
-    "W6 현재 상태"). 그래서 하네스는 `dr1_top` 을 직접 몬다.
-    **디스크립터·IRQ 경로는 따로 본다** — `tb/tb_g2_ctrl_top_dr1_fault.py`.
-    스크래치 쓰기 경로가 생기면(W7~W8) 이 클래스를 g2_ctrl_top 으로 올린다.
+        원소 인덱스        바이트 주소        용도
+        0     .. d-1       0     .. 2d-1     q
+        d     .. 2d-1      2d    .. 4d-1     k
+        2d    .. 3d-1      4d    .. 6d-1     v
+        3d    .. 4d-1      6d    .. 8d-1     o
+        512   .. 512+d²-1  1024  ..          DELTA_DUMP 목적지
+
+    전부 **16바이트 정렬**이다 (spec/deltarule.md 4절, d=16 이면 원소 8개 단위).
+    안 맞으면 fault_code 0x06 DR1_UNALIGNED 가 뜬다.
 
     ───────────────────────────────────────────────────────────────────────
     완료 판정 (docs/DESIGN.md 5.1, docs/BUGS.md BUG-001)
@@ -252,41 +256,88 @@ class CocotbDut(Dr1Dut):
     **레지스터 출력은 falling edge 에서 읽는다.** `RisingEdge` 직후에 읽으면
     논블로킹 대입 전이라 **이전 사이클 값**을 본다. cdc_fifo 테스트가 정확히
     이것으로 틀렸다 — RTL 은 정상인데 테스트가 리셋값을 보고 실패했다.
-    여기서 `dump_valid`/`dump_data`/`done_*` 를 전부 falling edge 에서 읽는 이유다.
+    그리고 valid/ready 는 **ready 를 볼 때까지 valid 를 유지**한다. 이것도
+    한 번 틀렸다 (W6: 두 번째 명령이 통째로 씹혔다).
     참고 구현: `tb/tb_cdc_fifo_async.py` 의 `read_n()`.
     """
 
-    # spec/deltarule.md 4절: 주소는 16바이트 정렬이어야 한다 (DR1_ADDR_ALIGN)
-    DUMP_ADDR = 0x1000
-
-    def __init__(self, dut, d: int, *, timeout_cycles: int = 512):
+    def __init__(self, dut, d: int, *, timeout_cycles: int = 4096):
         from tools.orbit_mmio_map import DR1_ADDR_ALIGN as _align
-        assert self.DUMP_ADDR % _align == 0, "덤프 주소가 정렬되지 않았다"
+
         self.dut = dut
         self.d = d
         self.timeout_cycles = timeout_cycles
 
-    # ── 저수준: 디스크립터 1개를 몰고 완료를 본다 ────────────────────────
-    async def _issue(self, opcode: int, slot: int, dst_addr: int = 0):
+        # 원소 인덱스 배치 — **단일 출처는 tools/orbit_mmio_map.dr1_scratch_layout** 이다
+        # (spec/deltarule.md 3.6절). 여기서 따로 계산하면 HAL 과 갈라진다.
+        from tools.orbit_mmio_map import dr1_scratch_layout
+
+        lay = dr1_scratch_layout(d)
+        self.q_elem = lay["q"]
+        self.k_elem = lay["k"]
+        self.v_elem = lay["v"]
+        self.o_elem = lay["o"]
+        self.dump_elem = lay["dump"]
+        for name, e in lay.items():
+            assert (e * 2) % _align == 0, f"{name} 주소가 {_align}바이트 정렬이 아니다"
+
+        self.sat_total_seen = 0      # DR1_SAT_COUNT 는 누적이라 증가분을 쓴다
+
+    # ── 스크래치 호스트 포트 ────────────────────────────────────────────
+    async def _scr_write(self, elem, value):
+        from cocotb.triggers import RisingEdge
+        from tools.orbit_pack import to_bits
+
+        dut = self.dut
+        dut.h_en.value = 1
+        dut.h_we.value = 1
+        dut.h_addr.value = int(elem)
+        dut.h_wdata.value = to_bits(int(value), 16)
+        await RisingEdge(dut.clk)
+        dut.h_en.value = 0
+        dut.h_we.value = 0
+
+    async def _scr_read(self, elem):
+        from cocotb.triggers import FallingEdge, RisingEdge
+        from tools.orbit_pack import from_bits
+
+        dut = self.dut
+        dut.h_en.value = 1
+        dut.h_we.value = 0
+        dut.h_addr.value = int(elem)
+        await RisingEdge(dut.clk)
+        dut.h_en.value = 0
+        await FallingEdge(dut.clk)       # 읽기 지연 정확히 1사이클
+        return from_bits(int(dut.h_rdata.value), 16)
+
+    # ── 디스크립터 1개 ──────────────────────────────────────────────────
+    async def _issue(self, opcode, slot=0, *, q_addr=0, k_addr=0, v_addr=0,
+                     dst_addr=0, alpha=0x8000, beta=0):
         from cocotb.triggers import FallingEdge, RisingEdge
 
         dut = self.dut
+        # **falling edge 에 정렬한 뒤** 입력을 세운다. 아무 때나 valid 를 올리고
+        # FallingEdge 를 기다리면 그 사이의 rising edge 가 이미 명령을 받아서
+        # 같은 디스크립터가 두 번 실행된다.
+        await FallingEdge(dut.clk)
         dut.cmd_opcode.value = int(opcode)
         dut.cmd_slot.value = int(slot)
+        dut.cmd_q_addr.value = int(q_addr)
+        dut.cmd_k_addr.value = int(k_addr)
+        dut.cmd_v_addr.value = int(v_addr)
         dut.cmd_dst_addr.value = int(dst_addr)
-
-        # valid/ready 계약: **ready 를 볼 때까지 valid 를 유지한다.**
-        # 처음에 이걸 안 지키고 valid 를 1사이클만 냈다가 두 번째 명령을 통째로
-        # 잃었다 (DUMP 타임아웃). 앞 명령이 ST_DONE_OK 에 있는 동안 cmd_ready 가
-        # 0 이기 때문이다 — RTL 은 정상이고 테스트가 틀렸다. cdc_fifo 와 같은 종류.
+        dut.cmd_alpha.value = int(alpha) & 0xFFFF
+        dut.cmd_beta.value = int(beta) & 0xFFFF
         dut.cmd_valid.value = 1
+
+        # valid/ready 계약: ready 를 볼 때까지 valid 를 유지한다
         for _ in range(self.timeout_cycles):
-            await FallingEdge(dut.clk)
             if int(dut.cmd_ready.value):
                 break
+            await FallingEdge(dut.clk)
         else:
             raise TimeoutError(f"opcode=0x{int(opcode):02X}: cmd_ready 가 오지 않았다")
-        await RisingEdge(dut.clk)      # 이 edge 에서 수락된다
+        await RisingEdge(dut.clk)          # 이 edge 에서 정확히 한 번 수락된다
         dut.cmd_valid.value = 0
 
         rows = {}
@@ -311,32 +362,55 @@ class CocotbDut(Dr1Dut):
             f"opcode=0x{int(opcode):02X} 가 {self.timeout_cycles} 사이클 안에 끝나지 않았다"
         )
 
+    async def _read_sat_delta(self):
+        """DR1_SAT_COUNT 는 누적이다. 이번 디스크립터의 증가분을 돌려준다."""
+        total = int(self.dut.dr1_sat_count.value)
+        delta = total - self.sat_total_seen
+        self.sat_total_seen = total
+        return delta
+
+    # ── Dr1Dut 인터페이스 ───────────────────────────────────────────────
     async def init(self, slot: int = 0) -> None:
         """DELTA_INIT — 상태 슬롯을 0 으로."""
         await self._issue(0x50, slot)
 
     async def step(self, slot: int, q, k, v, alpha: int, beta: int):
-        raise NotImplementedError(
-            "DELTA_STEP 은 W7 이다 (PLAN '한 번에 하나'). "
-            "RTL 에 보내면 fault_code 0x07 DR1_UNIMPL 로 실패한다 — "
-            "tb/tb_dr1_top_fsm.py test_f3 가 그것을 본다."
+        """DELTA_STEP — 토큰 1개. 반환 (o, sat, cycles).
+
+        순서: q/k/v 를 스크래치에 넣고 → 디스크립터 → o 를 회수.
+        sat 은 DR1_SAT_COUNT **증가분**이다 (골든 step() 의 sat_count 와 대응).
+        """
+        import numpy as np
+
+        for i, x in enumerate(np.asarray(q).reshape(-1)):
+            await self._scr_write(self.q_elem + i, int(x))
+        for i, x in enumerate(np.asarray(k).reshape(-1)):
+            await self._scr_write(self.k_elem + i, int(x))
+        for i, x in enumerate(np.asarray(v).reshape(-1)):
+            await self._scr_write(self.v_elem + i, int(x))
+
+        _, cycles = await self._issue(
+            0x51, slot,
+            q_addr=self.q_elem * 2, k_addr=self.k_elem * 2, v_addr=self.v_elem * 2,
+            dst_addr=self.o_elem * 2, alpha=alpha, beta=beta,
         )
+        sat = await self._read_sat_delta()
+
+        o = [await self._scr_read(self.o_elem + i) for i in range(self.d)]
+        return np.array(o, dtype=np.int64), sat, cycles
 
     async def dump(self, slot: int = 0):
-        """DELTA_DUMP — 상태 S 전체 (d, d) Q1.15.
+        """DELTA_DUMP — 상태 S 전체 (d, d) Q1.15. **스크래치에서** 읽는다.
 
-        행 우선 스트림을 받아 `tools/orbit_pack.unpack_state` 로 되돌린다.
-        평탄화 규칙은 그 모듈 한 곳에만 있다 (spec/deltarule.md 3.5절).
+        행 우선: 행 r 의 열 c 가 dump_base + r*d + c (spec/deltarule.md 3.5절).
         """
-        from tools.orbit_pack import unpack_state
+        import numpy as np
 
-        rows, _ = await self._issue(0x52, slot, self.DUMP_ADDR)
-        missing = [r for r in range(self.d) if r not in rows]
-        if missing:
-            raise AssertionError(f"덤프에 빠진 행이 있다: {missing}")
-        return unpack_state([rows[r] for r in range(self.d)], self.d)
-
-
+        await self._issue(0x52, slot, dst_addr=self.dump_elem * 2)
+        flat = []
+        for i in range(self.d * self.d):
+            flat.append(await self._scr_read(self.dump_elem + i))
+        return np.array(flat, dtype=np.int64).reshape(self.d, self.d)
 
 
 class OffByOneDut(GoldenDut):
