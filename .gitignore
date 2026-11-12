@@ -13,3 +13,7 @@ docs/
 *.str
 *.pb
 fpga/vck190/*.bin
+
+# 시뮬레이션 산출물
+sim_build/
+sim/legacy/

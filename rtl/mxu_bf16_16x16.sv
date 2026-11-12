@@ -14,8 +14,10 @@
 //   Stage 2: FP32 + FP32 → FP32 accumulate (registered add)
 //
 // BF16 format: {sign[15], exponent[14:7], mantissa[6:0]}
-//   Multiply: sign XOR, exponent add-127, mantissa 8×8 → 16-bit product
-//   Then convert to FP32 for accumulation.
+//
+// 산술(bf16_mul / fp32_add)은 rtl/bf16_pkg.sv 로 옮겼다. 이 모듈 안에만
+// 있던 탓에 mxu_bf16_128x128 이 누적 덧셈을 따로 구현했고 거기서 버그가
+// 났다. 이제 두 모듈이 같은 함수를 쓴다.
 `timescale 1ns/1ps
 `default_nettype none
 
@@ -41,153 +43,10 @@ module mxu_bf16_16x16 #(
   output logic        busy
 );
 
+  import bf16_pkg::bf16_mul;
+  import bf16_pkg::fp32_add;
+
   assign busy = en;
-
-  // ═══════════════════════════════════════════════════════════
-  // BF16 multiply → FP32 product (combinational)
-  // ═══════════════════════════════════════════════════════════
-  //
-  // BF16: {s[15], e[14:7], m[6:0]}
-  //   implied 1.m[6:0] = 8-bit mantissa with hidden bit
-  //   exponent bias = 127
-  //
-  // Product:
-  //   sign = a.s ^ b.s
-  //   exp  = a.e + b.e - 127
-  //   mant = (1.a.m) × (1.b.m) = 16-bit, normalize to 1.xxx...
-  //   Result as FP32: {sign, exp[7:0], mant[22:0]}
-
-  function automatic logic [31:0] bf16_mul(input logic [15:0] a, input logic [15:0] b);
-    logic        a_sign, b_sign, r_sign;
-    logic [7:0]  a_exp, b_exp;
-    logic [6:0]  a_man, b_man;
-    logic [8:0]  r_exp_raw;
-    logic [15:0] man_prod;  // 8×8 = 16 bits
-    logic [22:0] r_man;
-    logic [7:0]  r_exp;
-
-    a_sign = a[15];
-    b_sign = b[15];
-    a_exp  = a[14:7];
-    b_exp  = b[14:7];
-    a_man  = a[6:0];
-    b_man  = b[6:0];
-
-    r_sign = a_sign ^ b_sign;
-
-    if (a_exp == 8'd0 || b_exp == 8'd0) begin
-      // Zero input → zero result
-      bf16_mul = 32'd0;
-    end else if (a_exp == 8'hFF || b_exp == 8'hFF) begin
-      // Inf/NaN → clamp to max finite
-      bf16_mul = {r_sign, 8'hFE, 23'h7FFFFF};
-    end else begin
-      // Normal multiply
-      man_prod = {1'b1, a_man} * {1'b1, b_man};
-      r_exp_raw = {1'b0, a_exp} + {1'b0, b_exp} - 9'd127;
-
-      if (man_prod[15]) begin
-        r_man = {man_prod[14:0], 8'd0};
-        r_exp_raw = r_exp_raw + 1;
-      end else begin
-        r_man = {man_prod[13:0], 9'd0};
-      end
-
-      if (r_exp_raw[8] || r_exp_raw == 9'd0) begin
-        bf16_mul = 32'd0; // underflow
-      end else if (r_exp_raw >= 9'd255) begin
-        bf16_mul = {r_sign, 8'hFE, 23'h7FFFFF}; // overflow
-      end else begin
-        r_exp = r_exp_raw[7:0];
-        bf16_mul = {r_sign, r_exp, r_man};
-      end
-    end
-  endfunction
-
-  // ═══════════════════════════════════════════════════════════
-  // FP32 add (simplified, for accumulation)
-  // ═══════════════════════════════════════════════════════════
-
-  function automatic logic [31:0] fp32_add(input logic [31:0] a, input logic [31:0] b);
-    // All declarations at top (verilator requirement)
-    logic a_s, b_s, r_s;
-    logic [7:0] a_e, b_e, r_e, exp_diff;
-    logic [22:0] a_m, b_m, r_m;
-    logic [24:0] a_full, b_full;
-    logic [25:0] sum;
-
-    a_s = a[31]; a_e = a[30:23]; a_m = a[22:0];
-    b_s = b[31]; b_e = b[30:23]; b_m = b[22:0];
-
-    if (a_e == 0 && a_m == 0) begin
-      fp32_add = b;
-    end else if (b_e == 0 && b_m == 0) begin
-      fp32_add = a;
-    end else begin
-
-    a_full = {1'b1, a_m, 1'b0};
-    b_full = {1'b1, b_m, 1'b0};
-
-    if (a_e >= b_e) begin
-      exp_diff = a_e - b_e;
-      if (exp_diff > 25) b_full = 0;
-      else b_full = b_full >> exp_diff;
-      r_e = a_e;
-
-      if (a_s == b_s) begin
-        sum = {1'b0, a_full} + {1'b0, b_full};
-        r_s = a_s;
-      end else begin
-        if (a_full >= b_full) begin
-          sum = {1'b0, a_full} - {1'b0, b_full};
-          r_s = a_s;
-        end else begin
-          sum = {1'b0, b_full} - {1'b0, a_full};
-          r_s = b_s;
-        end
-      end
-    end else begin
-      exp_diff = b_e - a_e;
-      if (exp_diff > 25) a_full = 0;
-      else a_full = a_full >> exp_diff;
-      r_e = b_e;
-
-      if (a_s == b_s) begin
-        sum = {1'b0, b_full} + {1'b0, a_full};
-        r_s = a_s;
-      end else begin
-        if (b_full >= a_full) begin
-          sum = {1'b0, b_full} - {1'b0, a_full};
-          r_s = b_s;
-        end else begin
-          sum = {1'b0, a_full} - {1'b0, b_full};
-          r_s = a_s;
-        end
-      end
-    end
-
-    // Normalize
-    if (sum == 0) begin
-      fp32_add = 32'd0;
-    end else if (sum[25]) begin
-      sum = sum >> 1;
-      r_e = r_e + 1;
-    end else begin
-      while (!sum[24] && r_e > 0) begin
-        sum = sum << 1;
-        r_e = r_e - 1;
-      end
-    end
-
-    r_m = sum[23:1]; // drop hidden bit and guard
-    if (r_e >= 8'hFF) begin
-      fp32_add = {r_s, 8'hFE, 23'h7FFFFF}; // overflow clamp
-    end else begin
-      fp32_add = {r_s, r_e, r_m};
-    end
-
-    end // close outer else from zero-check
-  endfunction
 
   // ═══════════════════════════════════════════════════════════
   // 16×16 MAC array
