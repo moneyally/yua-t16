@@ -1,12 +1,18 @@
+# Python
 __pycache__/
 *.pyc
+.venv/
+
+# 시뮬레이션 / 빌드 산출물
 sim_build/
+build/
 *.vvp
 *.vcd
 *.fst
-.venv/
-build/
-docs/
+sim/legacy/
+sim/cocotb/.pyshim/
+
+# Vivado
 .Xil/
 *.jou
 *.log
@@ -14,6 +20,11 @@ docs/
 *.pb
 fpga/vck190/*.bin
 
-# 시뮬레이션 산출물
-sim_build/
-sim/legacy/
+# docs/ 는 더 이상 무시하지 않는다.
+#
+# 이 항목 때문에 docs/ 가 한 번도 커밋된 적이 없다. 그 결과
+#   - README 가 안내하는 "docs/ — 15 design documents" 가 클론에 없고
+#   - rtl/pcie_ep_versal.sv 가 SSOT 로 지목한
+#     ORBIT_G2_VCK190_PCIE_BRINGUP.md 를 아무도 읽을 수 없으며
+#   - tests/test_vck190_build_contract.py 의 문서 존재 검사 3건이
+#     클론 환경에서 구조적으로 통과할 수 없다.

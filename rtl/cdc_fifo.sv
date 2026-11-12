@@ -13,19 +13,6 @@ module cdc_fifo #(
   parameter int DATA_W = 32,
   parameter int DEPTH  = 16    // must be power of 2, minimum 4
 )(
-  // Static constraint: DEPTH must be >= 4.
-  // DEPTH=2 causes negative bit-select in gray-code full comparison
-  // (rd_gray_sync2[PTR_W-3:0] where PTR_W=2 → index -1).
-  initial begin
-    if (DEPTH < 4) begin
-      $error("cdc_fifo: DEPTH must be >= 4 (got %0d). DEPTH=2 causes gray full comparison bug.", DEPTH);
-      $finish;
-    end
-    if ((DEPTH & (DEPTH - 1)) != 0) begin
-      $error("cdc_fifo: DEPTH must be power of 2 (got %0d).", DEPTH);
-      $finish;
-    end
-  end
   // Write domain
   input  logic              wr_clk,
   input  logic              wr_rst_n,
@@ -39,9 +26,23 @@ module cdc_fifo #(
   input  logic              rd_rst_n,
   input  logic              rd_valid,   // read request
   output logic              rd_ready,   // data available
-  output logic [DATA_W-1:0] rd_data,
+  output logic [DATA_W-1:0] rd_data,   // FWFT: rd_ready 동안 유효
   output logic              empty
 );
+
+  // 파라미터 정합성 검사.
+  // 원래 이 initial 블록이 포트 리스트 한가운데에 있어서 모듈이 아예
+  // 파싱되지 않았다 (syntax error: unexpected initial, expecting '[').
+  // 본문으로 옮겼다.
+  //
+  // DEPTH=2 면 그레이 코드 full 비교에서 rd_gray_sync2[PTR_W-3:0] 의
+  // PTR_W 가 2 라 인덱스가 -1 이 된다.
+  initial begin
+    if (DEPTH < 4)
+      $fatal(1, "cdc_fifo: DEPTH must be >= 4 (got %0d)", DEPTH);
+    if ((DEPTH & (DEPTH - 1)) != 0)
+      $fatal(1, "cdc_fifo: DEPTH must be a power of 2 (got %0d)", DEPTH);
+  end
 
   localparam int ADDR_W = $clog2(DEPTH);
   localparam int PTR_W  = ADDR_W + 1;  // extra MSB for wrap detection
@@ -147,13 +148,18 @@ module cdc_fifo #(
     end
   end
 
-  // Read data (registered output for cleaner timing)
-  always_ff @(posedge rd_clk or negedge rd_rst_n) begin
-    if (!rd_rst_n)
-      rd_data <= '0;
-    else if (rd_handshake)
-      rd_data <= mem[rd_bin[ADDR_W-1:0]];
-  end
+  // Read data — first-word-fall-through (FWFT).
+  //
+  // 포트 선언이 rd_ready 를 "data available" 로 정의한다. 즉 rd_ready 가 1 인
+  // 동안 rd_data 는 이미 유효해야 한다. 원래 구현은 rd_handshake 가 난 "다음"
+  // 사이클에 데이터를 실어서 그 계약을 어겼고, 첫 읽기는 리셋값 0 이 나왔다.
+  // (이 모듈은 포트 리스트 안에 initial 블록이 있어 파싱 자체가 안 됐던 탓에
+  //  한 번도 검증된 적이 없다.)
+  //
+  // 트레이드오프: 비동기 메모리 읽기라 rd_clk 경로가 길어진다. 타이밍이
+  // 문제가 되면 prefetch 레지스터를 둔 FWFT 로 바꿔야 한다 — 출력만 등록하면
+  // 계약이 다시 깨진다.
+  assign rd_data = mem[rd_bin[ADDR_W-1:0]];
 
   // Synchronize wr_gray into rd domain (2-FF)
   always_ff @(posedge rd_clk or negedge rd_rst_n) begin

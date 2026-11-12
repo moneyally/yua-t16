@@ -283,7 +283,13 @@ module g3_desc_fsm #(
       fault_code_r <= 8'h00;
     else if (state != ST_FAULT && state_n == ST_FAULT) begin
       if (state == ST_CRC_CHECK)     fault_code_r <= 8'h02; // CRC fail
-      else if (state == ST_DECODE)   fault_code_r <= 8'h01; // illegal opcode
+      else if (state == ST_DECODE)
+        // ST_DECODE 는 두 가지 이유로 ST_FAULT 로 간다 (아래 FSM 참조):
+        //   모르는 opcode              → 0x01 illegal opcode
+        //   아는데 아직 타깃이 없는 것 → 0x04 unsupported target
+        // 원래 여기서 state 만 보고 무조건 0x01 을 썼다. 그래서 BACKWARD/
+        // OPTIMIZER/COLLECTIVE 가 "모르는 opcode" 로 잘못 보고됐다.
+        fault_code_r <= opcode_known(latched[0]) ? 8'h04 : 8'h01;
       else if (state == ST_WAIT)     fault_code_r <= 8'h03; // timeout
       else                           fault_code_r <= 8'h04; // unsupported
     end

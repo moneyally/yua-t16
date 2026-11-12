@@ -125,6 +125,10 @@ async def test_continuous_streaming(dut):
         dut.wr_valid.value = 0
 
     async def consumer():
+        # 원래 이 루프 안에 "safety timeout" 으로 500ns Timer 가 있었다.
+        # read_data 가 비어 있는 동안 매 반복마다 걸려서 아래 5000ns 예산을
+        # 다 태웠고, 결과적으로 한 건도 읽지 못한 채 실패했다.
+        # 전체 타임아웃은 아래 Timer(5000) 가 이미 보장한다.
         toggle = 0
         while len(read_data) < total:
             toggle ^= 1
@@ -137,9 +141,6 @@ async def test_continuous_streaming(dut):
                 read_data.append(int(dut.rd_data.value))
             if len(read_data) >= total:
                 break
-            # Safety timeout
-            if len(read_data) == 0:
-                await Timer(500, unit="ns")
 
     cocotb.start_soon(producer())
     cocotb.start_soon(consumer())

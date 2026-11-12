@@ -111,8 +111,14 @@ module trace_ring #(
       if (event_accepted) begin
         tail_r <= tail_next;
 
-        // If overwriting head, advance head too
-        if (wrapped_r && (tail_next == head_r)) begin
+        // 가장 오래된 항목을 덮어쓰는 중이면 head 도 한 칸 민다.
+        //
+        // 조건이 원래 (tail_next == head_r) 였다. 이번 쓰기가 "다음에"
+        // head 에 닿는지를 본 것이라 한 칸 늦고, 한 바퀴 돈 뒤에는
+        // tail_r 과 head_r 이 같은 값에서 출발하므로 조건이 영영 참이
+        // 되지 않아 head 가 0 에 박혀 있었다. 지금 쓰는 자리가 head 인지를
+        // 봐야 한다.
+        if (wrapped_r && (tail_r == head_r)) begin
           head_r <= head_r + 1'b1;
         end
 

@@ -11,6 +11,19 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
 
 
+async def settle(dut):
+    """클럭 엣지 직후 등록 출력이 안정되도록 한 델타 넘긴다.
+
+    cocotb 에서 `await RisingEdge(clk)` 직후에 바로 읽으면 Verilator 에서는
+    그 엣지로 갱신되기 "전" 값이 보인다. 이 엣지에서 막 바뀐 레지스터 출력을
+    검사하려면 한 델타를 넘겨야 한다.
+
+    ReadOnly 가 정석이지만, 이 테스트들은 검사 직후 다시 신호를 쓰기 때문에
+    ReadOnly 구간에 들어가면 쓰기가 막힌다. 짧은 Timer 로 넘긴다.
+    """
+    await Timer(1, unit="ns")
+
+
 async def reset_dut(dut):
     dut.rst_n.value = 0
     dut.alloc_inc.value = 0
@@ -45,6 +58,7 @@ async def test_dma_reserve_release(dut):
     dut.dma_reserve_inc.value = 0
 
     await RisingEdge(dut.clk)
+    await settle(dut)
     # effective_usage should be 1500 -> PRESSURE
     assert int(dut.effective_usage.value) == 1500
     assert int(dut.pressure_state.value) == 1  # PRESSURE
@@ -56,6 +70,7 @@ async def test_dma_reserve_release(dut):
     dut.dma_reserve_dec.value = 0
 
     await RisingEdge(dut.clk)
+    await settle(dut)
     assert int(dut.effective_usage.value) == 0
     assert int(dut.pressure_state.value) == 0  # NORMAL
 
@@ -77,6 +92,7 @@ async def test_simultaneous_alloc_and_reserve(dut):
     dut.dma_reserve_inc.value = 0
 
     await RisingEdge(dut.clk)
+    await settle(dut)
     assert int(dut.effective_usage.value) == 1600
     assert int(dut.pressure_state.value) == 1  # PRESSURE
 
@@ -95,4 +111,5 @@ async def test_underflow_detection(dut):
     dut.alloc_dec.value = 0
 
     await RisingEdge(dut.clk)
+    await settle(dut)
     assert dut.underflow_error.value == 1, "Underflow error not detected"
