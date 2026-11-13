@@ -84,6 +84,14 @@ def infer_top(stem: str, mods: set[str]) -> str | None:
     return None
 
 
+# 같은 모듈의 다른 파라미터 구성도 회귀에 포함한다.
+# (테스트벤치 이름 → top, 파라미터)
+VARIANTS: dict[str, tuple[str, dict]] = {
+    "test_mxu128_stream_rd": ("mxu_bf16_128x128",
+                              {"PAR": 8, "FP32_OUT": 0, "STREAM_RD": 1}),
+}
+
+
 def discover() -> list[tuple[str, Path, str | None]]:
     mods = set(module_table())
     found = []
@@ -97,10 +105,11 @@ def run_one(stem: str, tb_dir: Path, top: str) -> subprocess.CompletedProcess:
     """격리된 서브프로세스로 실행한다 (sys.path 오염 방지)."""
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)
-    return subprocess.run(
-        [sys.executable, str(ROOT / "sim/cocotb/run_one.py"), stem, top, str(tb_dir)],
-        cwd=ROOT, env=env, capture_output=True, text=True, timeout=1800,
-    )
+    cmd = [sys.executable, str(ROOT / "sim/cocotb/run_one.py"), stem, top, str(tb_dir)]
+    if stem in VARIANTS:
+        cmd.append(json.dumps(VARIANTS[stem][1]))
+    return subprocess.run(cmd, cwd=ROOT, env=env,
+                          capture_output=True, text=True, timeout=1800)
 
 
 def main() -> int:
@@ -110,6 +119,8 @@ def main() -> int:
     for stem, tb_dir, top in discover():
         if filt and filt not in stem:
             continue
+        if stem in VARIANTS:
+            top = VARIANTS[stem][0]
         if top is None:
             report.append({"tb": stem, "top": None, "status": "NO_TOP"})
             print(f"[SKIP] {stem:<34} top 모듈 추론 실패")

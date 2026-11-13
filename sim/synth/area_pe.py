@@ -4,7 +4,8 @@ import re, subprocess, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SRC = [ROOT / "rtl/bf16_pkg.sv", ROOT / "sim/synth/pe_bench.sv"]
+SRC = [ROOT / "rtl/bf16_pkg.sv",
+       ROOT / "sim/synth/pe_bench.sv", ROOT / "sim/synth/rd_bench.sv"]
 
 
 def area(top: str) -> dict:
@@ -36,7 +37,8 @@ if __name__ == "__main__":
         if "error" in a:
             print(f"{t:<22} 합성 실패: {a['error']}")
         else:
-            print(f"{t:<22} 셀 {a['cells']:>7,}   (타일 256개 기준 {a['cells']*256:>10,})")
+            per = "" if t.startswith(("tile_", "rd_", "conv_")) else f"   (타일 256개 기준 {a['cells']*256:>10,})"
+            print(f"{t:<22} 셀 {a['cells']:>9,}{per}")
     if len(res) == 2 and all("cells" in v for v in res.values()):
         (n1, a1), (n2, a2) = res.items()
         print(f"\n{n1} → {n2}: 셀 {a1['cells']:,} → {a2['cells']:,} "

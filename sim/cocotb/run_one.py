@@ -6,6 +6,7 @@ run_all.py 가 서브프로세스로 호출한다. 한 프로세스에 여러 �
 넣으면 sys.path 가 누적 오염되고, Verilator 메이크파일이 부르는 python3 가
 그 경로를 읽어 "SRE module mismatch" 로 죽는다.
 """
+import json
 import os
 import sys
 from pathlib import Path
@@ -31,10 +32,15 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def main() -> int:
     stem, top, tb_dir = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+    # 선택 4번째 인자: 파라미터 JSON. 같은 모듈의 다른 구성도 회귀에 넣는다.
+    params = json.loads(sys.argv[4]) if len(sys.argv) > 4 else {}
+    tag = stem if not params else stem
 
     # 빌드는 top 모듈별로 공유한다. 테스트벤치마다 따로 빌드하면
     # g2_ctrl_top 하나를 10번, mxu_bf16_128x128(PAR=8)을 2번 컴파일한다.
-    build = ROOT / "sim_build" / "build" / top
+    suffix = "" if not params else "_" + "_".join(
+        f"{k}{v}" for k, v in sorted(params.items()))
+    build = ROOT / "sim_build" / "build" / f"{top}{suffix}"
     results = ROOT / "sim_build" / "results"
     results.mkdir(parents=True, exist_ok=True)
 
@@ -52,6 +58,7 @@ def main() -> int:
     runner.build(
         sources=src,
         hdl_toplevel=top,
+        parameters=params,
         build_args=["--timing", "-Wno-fatal", "--public-flat-rw",
                     "-Wno-WIDTHEXPAND", "-Wno-TIMESCALEMOD",
                     "--unroll-count", "4096"],

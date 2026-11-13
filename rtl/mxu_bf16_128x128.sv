@@ -38,7 +38,16 @@ module mxu_bf16_128x128 #(
   parameter int DIM      = 128,
   parameter int TILE_DIM = 16,
   parameter int TILES    = 8,   // DIM / TILE_DIM
-  parameter int PAR      = 8    // 물리 타일 그리드 한 변. TILES 를 나누어야 함
+  parameter int PAR      = 8,   // 물리 타일 그리드 한 변. TILES 를 나누어야 함
+
+  // 출력 방식 (mxu_bf16_16x16 과 같은 의미).
+  // FP32_OUT=1 (기본): acc_flat 에 128×128 FP32 를 조합으로 내보낸다.
+  //   타일마다 PE 256개분 변환기가 붙는다.
+  // FP32_OUT=0 + STREAM_RD=1: acc_flat 을 0 으로 묶고, 타일당 변환기
+  //   하나를 공유해 rd_idx/rd_fp32 로 순차로 읽는다.
+  //   PAR=8 기준 변환기가 16,384개에서 64개로 줄어든다.
+  parameter int FP32_OUT  = 1,
+  parameter int STREAM_RD = 0
 )(
   input  logic        clk,
   input  logic        rst_n,
@@ -58,8 +67,13 @@ module mxu_bf16_128x128 #(
   output logic        done_pulse,
   output logic        ready,
 
-  // 누산기 출력: 128×128 FP32
-  output logic [31:0] acc_flat [0:DIM*DIM-1]
+  // 누산기 출력: 128×128 FP32 (FP32_OUT=0 이면 전부 0)
+  output logic [31:0] acc_flat [0:DIM*DIM-1],
+
+  // 공유 변환기 순차 읽기 (STREAM_RD=1 일 때만 유효)
+  // rd_idx 는 행 우선 평탄 인덱스다: idx = row * DIM + col
+  input  logic [$clog2(DIM*DIM)-1:0] rd_idx,
+  output logic [31:0]                rd_fp32
 );
 
   import bf16_pkg::fp32_add;
@@ -73,6 +87,8 @@ module mxu_bf16_128x128 #(
       $fatal(1, "mxu_bf16_128x128: TILES*TILE_DIM != DIM");
     if (PAR < 1 || TILES % PAR != 0)
       $fatal(1, "mxu_bf16_128x128: PAR must divide TILES");
+    if (STREAM_RD != 0 && PAR != TILES)
+      $fatal(1, "mxu_bf16_128x128: STREAM_RD requires PAR == TILES (누산값이 타일에 있어야 한다)");
   end
 
   // ═══════════════════════════════════════════════════════════
@@ -89,6 +105,33 @@ module mxu_bf16_128x128 #(
   localparam int GRP_W = (GROUPS > 1) ? $clog2(GROUPS) : 1;
   logic [GRP_W-1:0] grp_r, grp_c;
 
+  // ─── 공유 변환기 읽기 라우팅 ──────────────────────────────────
+  //
+  // rd_idx 는 행 우선 평탄 인덱스다: idx = row * DIM + col
+  //   row = idx[2*TD_W+TIL_W-1 : TD_W+TIL_W]   (상위 절반)
+  //   col = idx[TD_W+TIL_W-1   : 0]            (하위 절반)
+  // 각 절반을 다시 (논리 타일 번호, 타일 내 위치) 로 쪼갠다.
+  //
+  // STREAM_RD 은 PAR == TILES 일 때만 쓸 수 있다. PAR 이 작으면 누산값이
+  // 타일이 아니라 외부 acc_mem 에 있어서 타일을 읽어봐야 의미가 없다.
+  localparam int TD_W  = $clog2(TILE_DIM);   // 타일 내 좌표 폭 (4)
+  localparam int TIL_W = $clog2(TILES);      // 타일 번호 폭 (3)
+  localparam int HALF  = TD_W + TIL_W;       // 행/열 한 쪽 폭 (7)
+
+  logic [TD_W*2-1:0] tile_rd_idx;                      // 모든 타일에 같은 값
+  logic [31:0]       tile_rd_fp32 [0:PAR-1][0:PAR-1];
+
+  logic [TIL_W-1:0] rd_tile_r, rd_tile_c;
+  logic [TD_W-1:0]  rd_in_r,   rd_in_c;
+
+  always_comb begin
+    rd_tile_r = rd_idx[2*HALF-1    -: TIL_W];   // row 상위 TIL_W
+    rd_in_r   = rd_idx[2*HALF-TIL_W-1 -: TD_W]; // row 하위 TD_W
+    rd_tile_c = rd_idx[HALF-1      -: TIL_W];   // col 상위 TIL_W
+    rd_in_c   = rd_idx[TD_W-1      -: TD_W];    // col 하위 TD_W
+    tile_rd_idx = {rd_in_r, rd_in_c};
+  end
+
   genvar gr, gc, gi, gj;
   generate
     for (gr = 0; gr < PAR; gr++) begin : G_TROW
@@ -104,7 +147,12 @@ module mxu_bf16_128x128 #(
           assign b_s[gi] = b_row[(grp_c * PAR + gc) * TILE_DIM + gi];
         end
 
-        mxu_bf16_16x16 #(.ROWS(TILE_DIM), .COLS(TILE_DIM)) u_tile (
+        mxu_bf16_16x16 #(
+          .ROWS      (TILE_DIM),
+          .COLS      (TILE_DIM),
+          .FP32_OUT  (FP32_OUT),
+          .STREAM_RD (STREAM_RD)
+        ) u_tile (
           .clk     (clk),
           .rst_n   (rst_n),
           .en      (tile_en),
@@ -112,6 +160,8 @@ module mxu_bf16_128x128 #(
           .a_row   (a_s),
           .b_col   (b_s),
           .acc_out (o),
+          .rd_idx  (tile_rd_idx),
+          .rd_fp32 (tile_rd_fp32[gr][gc]),
           .busy    ()
         );
 
@@ -332,6 +382,16 @@ module mxu_bf16_128x128 #(
           endcase
         end
       end
+    end
+  endgenerate
+
+  // ─── 공유 변환기 최종 선택 ────────────────────────────────────
+  // STREAM_RD 일 때 PAR == TILES 이므로 물리 타일 번호 = 논리 타일 번호다.
+  generate
+    if (STREAM_RD != 0) begin : G_RD_MUX
+      assign rd_fp32 = tile_rd_fp32[rd_tile_r][rd_tile_c];
+    end else begin : G_RD_TIE
+      assign rd_fp32 = 32'd0;
     end
   endgenerate
 

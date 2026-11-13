@@ -30,7 +30,20 @@
 
 module mxu_bf16_16x16 #(
   parameter int ROWS = 16,
-  parameter int COLS = 16
+  parameter int COLS = 16,
+
+  // 출력 방식 선택.
+  //
+  // FP32_OUT=1 (기본): acc_out 에 16×16 FP32 를 조합으로 전부 내보낸다.
+  //   PE 마다 고정소수점→FP32 변환기가 하나씩 필요하다 (PE 당 720 셀,
+  //   PE 비용의 27%). 기존 인터페이스 그대로다.
+  //
+  // FP32_OUT=0 + STREAM_RD=1: acc_out 을 0 으로 묶고, 변환기 하나를
+  //   타일 전체가 공유한다. rd_idx 로 원소를 골라 rd_fp32 로 읽는다.
+  //   읽기는 GEMM 타일당 한 번뿐이므로 순차 읽기로 충분하다.
+  //   변환기 255개가 사라지는 대신 읽기 먹스 트리가 들어온다.
+  parameter int FP32_OUT  = 1,
+  parameter int STREAM_RD = 0
 )(
   input  logic        clk,
   input  logic        rst_n,
@@ -43,8 +56,12 @@ module mxu_bf16_16x16 #(
   input  logic [15:0] a_row [0:ROWS-1],   // 16 BF16 values
   input  logic [15:0] b_col [0:COLS-1],   // 16 BF16 values
 
-  // Output: 16×16 FP32 accumulator
+  // Output: 16×16 FP32 accumulator (FP32_OUT=0 이면 전부 0)
   output logic [31:0] acc_out [0:ROWS-1][0:COLS-1],
+
+  // 공유 변환기 순차 읽기 (STREAM_RD=1 일 때만 유효)
+  input  logic [$clog2(ROWS*COLS)-1:0] rd_idx,
+  output logic [31:0]                  rd_fp32,
 
   // Status
   output logic        busy
@@ -56,6 +73,9 @@ module mxu_bf16_16x16 #(
   // 16×16 MAC array — 고정소수점 누산
   // ═══════════════════════════════════════════════════════════
 
+  // 누산기는 모듈 레벨에 둔다. 공유 변환기가 인덱스로 고를 수 있어야 한다.
+  logic signed [bf16_pkg::ACC_W-1:0] acc_fxp [0:ROWS-1][0:COLS-1];
+
   genvar r, c;
   generate
     for (r = 0; r < ROWS; r = r + 1) begin : GEN_ROW
@@ -65,19 +85,45 @@ module mxu_bf16_16x16 #(
         logic signed [bf16_pkg::ACC_W-1:0] incr;
         assign incr = bf16_pkg::bf16_mul_fxp(a_row[r], b_col[c]);
 
-        // 누산기: 고정소수점 레지스터. 매 사이클 경로는 시프트 + 덧셈뿐이다.
-        logic signed [bf16_pkg::ACC_W-1:0] acc_fxp;
-
+        // 누산기: 매 사이클 경로는 시프트 + 덧셈뿐이다.
         always_ff @(posedge clk or negedge rst_n) begin
-          if (!rst_n)       acc_fxp <= '0;
-          else if (acc_clr) acc_fxp <= '0;
-          else if (en)      acc_fxp <= bf16_pkg::fxp_add_sat(acc_fxp, incr);
+          if (!rst_n)       acc_fxp[r][c] <= '0;
+          else if (acc_clr) acc_fxp[r][c] <= '0;
+          else if (en)      acc_fxp[r][c] <= bf16_pkg::fxp_add_sat(acc_fxp[r][c], incr);
         end
 
-        // 출력에서만 FP32 로 변환한다 (누산 루프 밖, 조합)
-        assign acc_out[r][c] = bf16_pkg::fxp_to_fp32(acc_fxp);
-
       end
+    end
+  endgenerate
+
+  // ─── 출력 경로 ────────────────────────────────────────────────
+  generate
+    if (FP32_OUT != 0) begin : G_PER_PE_CONV
+      // PE 마다 변환기. 기존 인터페이스.
+      for (r = 0; r < ROWS; r = r + 1) begin : OR_
+        for (c = 0; c < COLS; c = c + 1) begin : OC_
+          assign acc_out[r][c] = bf16_pkg::fxp_to_fp32(acc_fxp[r][c]);
+        end
+      end
+    end else begin : G_NO_CONV
+      for (r = 0; r < ROWS; r = r + 1) begin : TR_
+        for (c = 0; c < COLS; c = c + 1) begin : TC_
+          assign acc_out[r][c] = 32'd0;
+        end
+      end
+    end
+  endgenerate
+
+  generate
+    if (STREAM_RD != 0) begin : G_SHARED_CONV
+      // 타일 전체가 변환기 하나를 공유한다.
+      localparam int RW = $clog2(ROWS);
+      localparam int CW = $clog2(COLS);
+      logic signed [bf16_pkg::ACC_W-1:0] rd_sel;
+      assign rd_sel  = acc_fxp[rd_idx[RW+CW-1:CW]][rd_idx[CW-1:0]];
+      assign rd_fp32 = bf16_pkg::fxp_to_fp32(rd_sel);
+    end else begin : G_NO_STREAM
+      assign rd_fp32 = 32'd0;
     end
   endgenerate
 
