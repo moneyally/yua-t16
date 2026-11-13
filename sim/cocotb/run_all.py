@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 OVERRIDES: dict[str, str] = {
     "tb_g2_ctrl_top_host_e2e":   "g2_ctrl_top",
     "tb_cdc_fifo_async":         "cdc_fifo",
+    "tb_pcie_ep_completer":      "pcie_ep_versal",
     "tb_cdc_fifo_reset":         "cdc_fifo",
     "test_mxu16_kstep":          "tb_mxu16_flat",
     "test_fxp_arith":            "fxp_dut",
