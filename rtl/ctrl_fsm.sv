@@ -1,3 +1,20 @@
+// ctrl_fsm.sv — 디스크립터 수신 → 디코드 → 코어 발행
+//
+// 발행 경로와 완료 경로를 분리했다.
+//
+//   발행: ST_IDLE → ST_LATCH → ST_DECODE → ST_DISPATCH → ST_IDLE
+//   완료: core_done 을 그대로 흘려보낸다 (GEMM 디스크립터)
+//         GEMM 이 아닌 디스크립터는 ST_DONE 에서 자체 생성
+//
+// 이전에는 ST_DISPATCH 다음이 ST_WAIT 였고 거기서 core_done 을 기다린
+// 뒤에야 ST_IDLE 로 돌아가 desc_ready 를 올렸다. gemm_core 가 쓰기 FSM
+// 분리로 다음 명령을 일찍 받을 수 있게 됐는데도 시스템 처리량이 그대로
+// 였던 이유가 이것이다 (gemm_top 경유 274.8 사이클/op vs 코어 직접
+// 210.1). 이제 코어가 명령을 받는 즉시 다음 디스크립터를 받는다.
+//
+// gemm_top 의 커맨드 브리지가 cmd_valid 를 코어 수용 시점까지 유지하고
+// cmd_ready_ctrl 을 그때 올리므로, ST_DISPATCH 를 빠져나오는 순간
+// 래치/디코드 레지스터를 덮어써도 안전하다.
 `timescale 1ns/1ps
 `default_nettype none
 
@@ -28,7 +45,6 @@ module ctrl_fsm #(
     ST_LATCH,
     ST_DECODE,
     ST_DISPATCH,
-    ST_WAIT,
     ST_DONE
   } state_t;
 
@@ -40,7 +56,14 @@ module ctrl_fsm #(
   logic [63:0] act_addr_r, wgt_addr_r, out_addr_r;
   logic [31:0] Kt_r;
 
-  logic core_done_seen;
+  // 코어에 떠 있는 GEMM 명령 수. busy 판정에 쓴다.
+  logic [1:0] outstanding;
+
+  // 내보내야 할 done 펄스 큐.
+  // core_done 과 ST_DONE(비 GEMM) 이 같은 사이클에 겹칠 수 있으므로
+  // 하나로 합치지 않고 큐에 쌓아 한 사이클짜리 펄스로 하나씩 낸다.
+  logic [2:0] done_q;
+  logic       done_r;
 
   function automatic logic [63:0] u64_le(input int base);
     u64_le = {
@@ -82,18 +105,34 @@ module ctrl_fsm #(
     end
   end
 
+  wire issue      = (state == ST_DISPATCH) && cmd_ready;
+  wire local_done = (state == ST_DONE);
+
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      core_done_seen <= 1'b0;
+      outstanding <= 2'd0;
     end else begin
-      // FIX v0.2: ST_DISPATCH 진입 시에도 core_done_seen 클리어
-      // Kt=1 엣지케이스에서 gemm_core가 빠르게 완료되면
-      // ST_DISPATCH 상태에서 core_done=1이 이미 세팅될 수 있음
-      if (state == ST_IDLE || state == ST_DISPATCH) begin
-        core_done_seen <= 1'b0;
-      end else if (core_done === 1'b1) begin
-        core_done_seen <= 1'b1;
-      end
+      case ({issue, core_done})
+        2'b10:   outstanding <= outstanding + 2'd1;
+        2'b01:   if (outstanding != 2'd0) outstanding <= outstanding - 2'd1;
+        default: ;   // 둘 다 또는 아무것도 → 변화 없음
+      endcase
+    end
+  end
+
+  // 완료 펄스 큐. 한 사이클 펄스 뒤 반드시 한 사이클 비운다.
+  wire [2:0] done_inc = (core_done ? 3'd1 : 3'd0) + (local_done ? 3'd1 : 3'd0);
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      done_q <= 3'd0;
+      done_r <= 1'b0;
+    end else if (!done_r && (done_q + done_inc) != 3'd0) begin
+      done_r <= 1'b1;
+      done_q <= done_q + done_inc - 3'd1;
+    end else begin
+      done_r <= 1'b0;
+      done_q <= done_q + done_inc;
     end
   end
 
@@ -118,14 +157,14 @@ module ctrl_fsm #(
         busy      = 1'b1;
         cmd_valid = 1'b1;
       end
-      ST_WAIT: begin
-        busy = 1'b1;
-      end
-      ST_DONE: begin
-        done_pulse = 1'b1;
-      end
+      ST_DONE: ;   // 펄스는 아래 큐가 낸다
       default: ;
     endcase
+
+    // 코어에 아직 떠 있는 명령이 있으면 IDLE 이어도 바쁘다.
+    if (outstanding != 2'd0 || done_q != 3'd0 || done_r) busy = 1'b1;
+
+    done_pulse = done_r;
   end
 
   always_comb begin
@@ -140,10 +179,9 @@ module ctrl_fsm #(
         else                     state_n = ST_DONE;
       end
       ST_DISPATCH: begin
-        if (cmd_ready) state_n = ST_WAIT;
-      end
-      ST_WAIT: begin
-        if (core_done_seen) state_n = ST_DONE;
+        // 코어가 명령을 받는 즉시 다음 디스크립터를 받으러 돌아간다.
+        // 완료는 core_done 이 따로 알려준다.
+        if (cmd_ready) state_n = ST_IDLE;
       end
       ST_DONE: state_n = ST_IDLE;
       default: state_n = ST_IDLE;
