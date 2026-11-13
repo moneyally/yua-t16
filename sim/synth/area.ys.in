@@ -1,0 +1,9 @@
+# area.ys — 모듈 하나를 일반 셀 라이브러리로 합성해 면적 근사치를 낸다.
+# 절대 면적이 아니라 "재설계 전/후 비교"를 위한 상대 지표다.
+read_verilog -sv @SOURCES@
+hierarchy -top @TOP@
+proc; opt; fsm; opt; memory; opt
+techmap; opt
+abc -g simple
+opt_clean
+stat

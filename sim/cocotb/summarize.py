@@ -10,7 +10,7 @@ tot = {"pass": 0, "fail": 0}
 rows = []
 for r in rep:
     tb, status = r["tb"], r["status"]
-    x = ROOT/"sim_build"/f"all_{tb}"/"results.xml"
+    x = ROOT/"sim_build"/"results"/f"{tb}.xml"
     p = f = 0
     detail = r.get("err", "")
     if x.exists():

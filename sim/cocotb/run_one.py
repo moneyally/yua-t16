@@ -23,7 +23,7 @@ if not _LINK.exists():
 os.environ["PATH"] = f"{_SHIM}{os.pathsep}{os.environ.get('PATH', '')}"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rtl_deps import deps                                    # noqa: E402
+from rtl_deps import deps, packages                          # noqa: E402
 from cocotb_tools.runner import get_runner                   # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -31,10 +31,20 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def main() -> int:
     stem, top, tb_dir = sys.argv[1], sys.argv[2], Path(sys.argv[3])
-    build = ROOT / "sim_build" / f"all_{stem}"
 
-    if top == "tb_mxu16_flat":
-        src = deps("mxu_bf16_16x16") + [ROOT / "sim/cocotb/tb_mxu16_flat.sv"]
+    # 빌드는 top 모듈별로 공유한다. 테스트벤치마다 따로 빌드하면
+    # g2_ctrl_top 하나를 10번, mxu_bf16_128x128(PAR=8)을 2번 컴파일한다.
+    build = ROOT / "sim_build" / "build" / top
+    results = ROOT / "sim_build" / "results"
+    results.mkdir(parents=True, exist_ok=True)
+
+    # top 이 rtl/ 이 아니라 sim/cocotb/ 에 있는 검증용 래퍼일 수 있다.
+    # 그 경우 래퍼가 감싸는 모듈의 의존성 + 래퍼 자신을 쓴다.
+    wrapper = ROOT / "sim/cocotb" / f"{top}.sv"
+    if wrapper.exists():
+        inner = {"tb_mxu16_flat": "mxu_bf16_16x16"}.get(top)
+        base = deps(inner) if inner else packages()
+        src = base + [wrapper]
     else:
         src = deps(top)
 
@@ -50,7 +60,7 @@ def main() -> int:
     )
     sys.path.insert(0, str(tb_dir))
     runner.test(hdl_toplevel=top, test_module=stem,
-                results_xml=str(build / "results.xml"))
+                results_xml=str(results / f"{stem}.xml"))
     return 0
 
 
