@@ -75,13 +75,24 @@ module gemm_core #(
     S_ACC_CLR,
     S_COMPUTE,
     S_POST_MAC,   // drain 1cycle (last MAC happens on entry edge)
-    S_LATCH,      // ✅ NEW: latch acc_out_flat -> acc_out_lat
-    S_WR_REQ,
-    S_WR_SEND,
-    S_DONE
+    S_LATCH       // acc_out_flat -> acc_out_lat, 쓰기 FSM 기동
   } state_t;
 
   state_t st, st_n;
+
+  // ── 쓰기 백엔드 FSM ────────────────────────────────────────────
+  //
+  // 쓰기는 Kt 와 무관하게 64 비트(1,024바이트) 고정이다. 메인 FSM 안에
+  // 두면 그 동안 MAC 배열과 DMA 읽기 채널이 통째로 논다 (Kt=1 에서
+  // 79 사이클 중 65 가 쓰기였다). 읽기와 쓰기는 독립 채널이므로
+  // 분리하면 다음 디스크립터의 페치/연산과 겹칠 수 있다.
+  //
+  // acc_out_lat 은 단일 버퍼라 메인 FSM 은 S_LATCH 에서 쓰기 FSM 이
+  // 비기를 기다린다. 그 지점만 지키면 나머지는 자유롭게 겹친다.
+  typedef enum logic [1:0] { W_IDLE, W_REQ, W_SEND, W_DONE } wstate_t;
+  wstate_t wst, wst_n;
+
+  logic wr_start;      // S_LATCH 에서 1 사이클 펄스
 
 
   assign cmd_ready = (st == S_IDLE);
@@ -223,12 +234,14 @@ genvar kk;
 generate
   for (kk = 0; kk < 256; kk++) begin : GEN_ACC_LAT
     always_ff @(posedge clk or negedge rst_n) begin
+      // S_ACC_CLR 에서 지우던 것을 래치 시점으로 접었다.
+      // 쓰기 FSM 이 분리되면서 다음 디스크립터가 S_ACC_CLR 에 도달할 때
+      // 아직 전송 중인 acc_out_lat 을 지워버리는 해저드가 생기기 때문이다.
+      // Kt=0 이면 0 을 래치하므로 동작은 같다.
       if (!rst_n)
         acc_out_lat[kk] <= 32'sd0;
-      else if (st == S_ACC_CLR)
-        acc_out_lat[kk] <= 32'sd0;
-      else if (st == S_LATCH && (Kt_r != 0))
-        acc_out_lat[kk] <= acc_out_mac[kk];
+      else if (st == S_LATCH)
+        acc_out_lat[kk] <= (Kt_r != 0) ? acc_out_mac[kk] : 32'sd0;
     end
   end
 endgenerate
@@ -325,11 +338,11 @@ end
       wr_data_r  <= 128'd0;
       wr_valid_r <= 1'b0;
     end else begin
-      if (st == S_WR_REQ && wr_req_ready) begin
+      if (wst == W_REQ && wr_req_ready) begin
         out_beat   <= 7'd0;
         wr_data_r  <= pack4(0);
         wr_valid_r <= 1'b1;
-      end else if (st == S_WR_SEND) begin
+      end else if (wst == W_SEND) begin
         if (wr_valid_r && wr_data_ready) begin
           if (out_beat == OUT_BEATS-1) begin
             wr_valid_r <= 1'b0;
@@ -346,15 +359,46 @@ end
   end
 
   assign wr_data       = wr_data_r;
-  assign wr_data_valid = (st == S_WR_SEND) && wr_valid_r;
-  assign wr_data_last  = (st == S_WR_SEND) && wr_valid_r && (out_beat == OUT_BEATS-1);
+  assign wr_data_valid = (wst == W_SEND) && wr_valid_r;
+  assign wr_data_last  = (wst == W_SEND) && wr_valid_r && (out_beat == OUT_BEATS-1);
 
   // ----------------------------
   // outputs
   // ----------------------------
   assign rd_data_ready = 1'b1;
-  assign busy = (st != S_IDLE && st != S_DONE);
-  assign done = (st == S_DONE);
+  // 메인 FSM 이 S_IDLE 로 돌아와도 쓰기가 남아 있으면 아직 바쁘다.
+  assign busy = (st != S_IDLE) || (wst != W_IDLE);
+  // done 은 쓰기가 끝난 시점에 울린다 (결과가 메모리에 실제로 도착한 때).
+  assign done = (wst == W_DONE);
+
+  // ----------------------------
+  // 쓰기 FSM
+  // ----------------------------
+  always_comb begin
+    wst_n        = wst;
+    wr_req_valid = 1'b0;      // 이 신호는 쓰기 FSM 이 단독으로 구동한다
+    case (wst)
+      W_IDLE: if (wr_start) wst_n = W_REQ;
+
+      W_REQ: begin
+        wr_req_valid = 1'b1;
+        if (wr_req_ready) wst_n = W_SEND;
+      end
+
+      W_SEND:
+        if (wr_data_ready && wr_valid_r && (out_beat == OUT_BEATS-1))
+          wst_n = W_DONE;
+
+      W_DONE: wst_n = W_IDLE;
+
+      default: wst_n = W_IDLE;
+    endcase
+  end
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) wst <= W_IDLE;
+    else        wst <= wst_n;
+  end
 
   // ----------------------------
   // FSM sequential
@@ -384,7 +428,7 @@ end
     rd_req_addr      = 64'd0;
     rd_req_len_bytes = rd_len_r;
 
-    wr_req_valid     = 1'b0;
+    // wr_req_valid 는 쓰기 FSM 소유다. 여기서 건드리면 다중 구동이 된다.
     wr_req_addr      = out_base_r;
     wr_req_len_bytes = OUT_BYTES;
 
@@ -399,6 +443,7 @@ end
     mac_acc_clr = 1'b0;
     act_issue   = 1'b0;
     wgt_issue   = 1'b0;
+    wr_start    = 1'b0;
    issue_fire  = 1'b0;
     // default raddr = last issued
     rd_k_mux    = rd_k_r;
@@ -464,21 +509,11 @@ end
       end
 
       S_LATCH: begin
-        st_n = S_WR_REQ;
-      end
-
-      S_WR_REQ: begin
-        wr_req_valid = 1'b1;
-        if (wr_req_ready) st_n = S_WR_SEND;
-      end
-
-      S_WR_SEND: begin
-        if (wr_data_ready && wr_valid_r && (out_beat == OUT_BEATS-1))
-          st_n = S_DONE;
-      end
-
-      S_DONE: begin
-        st_n = S_IDLE;
+        // 쓰기 FSM 이 비어야 acc_out_lat 을 덮어쓸 수 있다.
+        if (wst == W_IDLE) begin
+          wr_start = 1'b1;
+          st_n     = S_IDLE;   // 래치 즉시 다음 디스크립터를 받는다
+        end
       end
 
       default: st_n = S_IDLE;

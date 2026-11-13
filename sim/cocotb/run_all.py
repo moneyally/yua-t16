@@ -29,6 +29,8 @@ OVERRIDES: dict[str, str] = {
     "tb_cdc_fifo_reset":         "cdc_fifo",
     "test_mxu16_kstep":          "tb_mxu16_flat",
     "test_fxp_arith":            "fxp_dut",
+    "test_gemm_utilization":     "gemm_top",
+    "test_gemm_core_throughput": "gemm_core",
     "test_mxu128_kstep":         "mxu_bf16_128x128",
     "test_mac_array":            "mac_array",
     "test_gemm_int4":            "gemm_int4",
