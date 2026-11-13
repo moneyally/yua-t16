@@ -2,7 +2,10 @@
 `default_nettype none
 
 module gemm_top #(
-  parameter int MAX_KT = 256
+  parameter int MAX_KT = 256,
+  // DMA 읽기 폭 (128 또는 256). gemm_core 로 그대로 내려간다.
+  // spec/memory-bandwidth-analysis.md 참조.
+  parameter int RD_DATA_W = 128
 )(
   input  logic        clk,
   input  logic        rst_n,
@@ -19,7 +22,7 @@ module gemm_top #(
   input  logic        rd_done,
 
   input  logic        rd_data_valid,
-  input  logic [127:0] rd_data,
+  input  logic [RD_DATA_W-1:0] rd_data,
   output logic        rd_data_ready,
   input  logic        rd_data_last,
 
@@ -121,7 +124,7 @@ module gemm_top #(
   // -------------------------
   // GEMM CORE
   // -------------------------
-  gemm_core #(.MAX_KT(MAX_KT)) u_core (
+  gemm_core #(.MAX_KT(MAX_KT), .RD_DATA_W(RD_DATA_W)) u_core (
     .clk(clk),
     .rst_n(rst_n),
 

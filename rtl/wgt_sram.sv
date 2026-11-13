@@ -1,8 +1,16 @@
 `timescale 1ns/1ps
 `default_nettype none
 
+// wgt_sram.sv — 피연산자 스테이징 SRAM
+//
+// DATA_W 는 DMA 읽기 폭과 같다. 128 이면 워드 하나가 K-step 하나
+// (INT8 16개), 256 이면 K-step 두 개가 한 워드에 들어온다.
+// 넓힌 쪽은 DMA 비트 수가 줄어 읽기 대역폭 병목이 완화된다.
+// DEPTH 는 워드 수다 (= MAX_KT / (DATA_W/128)).
 module wgt_sram #(
-  parameter int MAX_KT = 256
+  parameter int MAX_KT = 256,
+  parameter int DATA_W = 128,
+  parameter int DEPTH  = MAX_KT
 )(
   input  logic clk,
   input  logic rst_n,
@@ -10,16 +18,16 @@ module wgt_sram #(
   input  logic we,
   input  logic re,
 
-  input  logic [$clog2(MAX_KT)-1:0] waddr,
-  input  logic [127:0]              wdata,
+  input  logic [$clog2(DEPTH)-1:0]  waddr,
+  input  logic [DATA_W-1:0]         wdata,
 
-  input  logic [$clog2(MAX_KT)-1:0] raddr,
-  output logic [127:0]              rdata
+  input  logic [$clog2(DEPTH)-1:0]  raddr,
+  output logic [DATA_W-1:0]         rdata
 );
 
-  localparam int AW = $clog2(MAX_KT);
+  localparam int AW = $clog2(DEPTH);
 
-  logic [127:0] mem [0:MAX_KT-1];
+  logic [DATA_W-1:0] mem [0:DEPTH-1];
   integer i;
 
   function automatic logic has_x_addr(input logic [AW-1:0] a);
@@ -29,7 +37,7 @@ module wgt_sram #(
 `ifdef COCOTB_SIM
   initial begin
     rdata = '0;
-    for (i = 0; i < MAX_KT; i = i + 1)
+    for (i = 0; i < DEPTH; i = i + 1)
       mem[i] = '0;
   end
 `endif
@@ -38,7 +46,7 @@ module wgt_sram #(
     if (!rst_n) begin
       rdata <= '0;
 `ifdef COCOTB_SIM
-      for (i = 0; i < MAX_KT; i = i + 1)
+      for (i = 0; i < DEPTH; i = i + 1)
         mem[i] <= '0;
 `endif
     end else begin

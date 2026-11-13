@@ -92,6 +92,7 @@ def infer_top(stem: str, mods: set[str]) -> str | None:
 VARIANTS: dict[str, tuple[str, dict]] = {
     "test_mxu128_stream_rd": ("mxu_bf16_128x128",
                               {"PAR": 8, "FP32_OUT": 0, "STREAM_RD": 1}),
+    "test_gemm_rd256":      ("gemm_top", {"RD_DATA_W": 256}),
 }
 
 

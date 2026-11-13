@@ -26,10 +26,15 @@ def has_xz(binstr: str):
 
 
 class DMAStub:
-    def __init__(self, dut, mem: SimpleMem, beat_bytes=16, log=False):
+    def __init__(self, dut, mem: SimpleMem, beat_bytes=16, log=False,
+                 rd_beat_bytes=None, wr_beat_bytes=None):
+        # 읽기와 쓰기는 독립 채널이라 폭이 다를 수 있다.
+        # gemm_core 의 RD_DATA_W 를 넓히면 읽기 비트만 넓어진다.
         self.dut = dut
         self.mem = mem
         self.beat_bytes = beat_bytes
+        self.rd_beat_bytes = rd_beat_bytes or beat_bytes
+        self.wr_beat_bytes = wr_beat_bytes or beat_bytes
         self.log = log
         self.errors = []   # ✅ 에러 누적 버퍼
 
@@ -57,8 +62,8 @@ class DMAStub:
 
             if rd_active:
                 data = self.mem.read_bytes(
-                    rd_base + rd_idx * self.beat_bytes,
-                    self.beat_bytes,
+                    rd_base + rd_idx * self.rd_beat_bytes,
+                    self.rd_beat_bytes,
                 )
                 dut.rd_data.value = int.from_bytes(data, "little")
                 dut.rd_data_valid.value = 1
@@ -75,9 +80,9 @@ class DMAStub:
 
                 rd_base = int(dut.rd_req_addr.value)
                 length = int(dut.rd_req_len_bytes.value)
-                assert length % self.beat_bytes == 0
+                assert length % self.rd_beat_bytes == 0
 
-                rd_beats = length // self.beat_bytes
+                rd_beats = length // self.rd_beat_bytes
                 rd_idx = 0
                 rd_active = True
 
@@ -120,9 +125,9 @@ class DMAStub:
 
                 wr_base = int(dut.wr_req_addr.value)
                 length = int(dut.wr_req_len_bytes.value)
-                assert length % self.beat_bytes == 0
+                assert length % self.wr_beat_bytes == 0
 
-                wr_beats = length // self.beat_bytes
+                wr_beats = length // self.wr_beat_bytes
                 wr_idx = 0
                 wr_active = True
 
@@ -140,14 +145,14 @@ class DMAStub:
                             "type": "WR_DATA_X",
                             "bits": bits,
                             "data": bx,
-                            "addr": wr_base + wr_idx * self.beat_bytes,
+                            "addr": wr_base + wr_idx * self.wr_beat_bytes,
                             "beat": wr_idx,
                         })
 
                     # Write the actual beat data to the correct address
-                    data = int(v).to_bytes(self.beat_bytes, "little")
+                    data = int(v).to_bytes(self.wr_beat_bytes, "little")
                     self.mem.write_bytes(
-                        wr_base + wr_idx * self.beat_bytes, data
+                        wr_base + wr_idx * self.wr_beat_bytes, data
                     )
 
                     if wr_idx == wr_beats - 1:
@@ -170,8 +175,10 @@ class DMAStub:
         assert False, f"{len(self.errors)} DMA errors detected"
 
 
-def start_dma(dut, mem: SimpleMem, log=False):
-    dma = DMAStub(dut, mem, log=log)
+def start_dma(dut, mem: SimpleMem, log=False, rd_beat_bytes=None,
+              wr_beat_bytes=None):
+    dma = DMAStub(dut, mem, log=log, rd_beat_bytes=rd_beat_bytes,
+                  wr_beat_bytes=wr_beat_bytes)
     cocotb.start_soon(dma.run_read())
     cocotb.start_soon(dma.run_write())
     return dma

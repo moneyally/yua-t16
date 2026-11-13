@@ -3,7 +3,20 @@
 
 module gemm_core #(
   parameter int MAX_KT = 256,
-  parameter int DMA_BEAT_BYTES = 16
+  parameter int DMA_BEAT_BYTES = 16,
+
+  // DMA 읽기 데이터 폭. 128 또는 256.
+  //
+  // 한 K-step 은 INT8 16개 = 128비트다. 128 이면 비트 하나가 K-step
+  // 하나를 나르고, 256 이면 두 개를 나른다. 전송 바이트 수는 같고
+  // 비트 수가 절반이 되므로 읽기 채널 병목이 완화된다.
+  //
+  // Kt=64 기준: 읽기 128 비트 vs 연산 68 사이클 → 읽기가 1.9배 모자라
+  // 완전히 겹쳐도 가동률 상한이 53% 다. 256비트면 읽기 64 비트가 되어
+  // 연산 한계에 닿는다. spec/memory-bandwidth-analysis.md 참조.
+  //
+  // 쓰기 채널은 건드리지 않는다 (독립 채널이고 병목이 아니다).
+  parameter int RD_DATA_W = 128
 )(
   input  logic clk,
   input  logic rst_n,
@@ -25,7 +38,7 @@ module gemm_core #(
   input  logic         rd_done,
 
   input  logic         rd_data_valid,
-  input  logic [127:0] rd_data,
+  input  logic [RD_DATA_W-1:0] rd_data,
   output logic         rd_data_ready,
   input  logic         rd_data_last,
 
@@ -110,7 +123,12 @@ module gemm_core #(
       wgt_base_r <= wgt_addr;
       out_base_r <= out_addr;
       Kt_r       <= clamp_kt(Kt);
-      rd_len_r   <= clamp_kt(Kt) * DMA_BEAT_BYTES;
+      // 읽기 길이는 비트 크기의 배수여야 한다.
+      // RD_DATA_W=256 이면 비트 하나가 K-step 두 개를 나르므로, Kt 가
+      // 홀수면 Kt*16 바이트가 32 의 배수가 아니다. 워드 단위로 올림해
+      // 요청한다. 남는 절반은 SRAM 마지막 워드의 상위에 들어가고
+      // 연산은 k < Kt 만 읽으므로 사용되지 않는다.
+      rd_len_r   <= 16'(((clamp_kt(Kt) + KPW - 1) / KPW) * KPW * DMA_BEAT_BYTES);
     end
   end
 
@@ -128,7 +146,7 @@ module gemm_core #(
     end else begin
       if (busy) cyc_r <= cyc_r + 1;
       bytes_r <= bytes_r
-        + ((rd_data_valid && rd_data_ready) ? DMA_BEAT_BYTES : 0)
+        + ((rd_data_valid && rd_data_ready) ? (RD_DATA_W/8) : 0)
         + ((wr_data_valid && wr_data_ready) ? DMA_BEAT_BYTES : 0);
     end
   end
@@ -136,34 +154,71 @@ module gemm_core #(
   // ----------------------------
   // SRAM interfaces
   // ----------------------------
-  logic act_we, wgt_we, act_re, wgt_re;
-  logic [ADDR_W-1:0] act_waddr, wgt_waddr;
-  logic [ADDR_W-1:0] act_raddr, wgt_raddr;
-  logic [127:0] act_rdata, wgt_rdata;
+  // 워드 하나에 들어가는 K-step 수와 SRAM 워드 수
+  localparam int KPW        = RD_DATA_W / 128;              // 1 또는 2
+  localparam int KPW_W      = (KPW > 1) ? $clog2(KPW) : 1;
+  localparam int SRAM_DEPTH = (MAX_KT + KPW - 1) / KPW;
+  localparam int SADDR_W    = $clog2(SRAM_DEPTH);
 
-  act_sram #(.MAX_KT(MAX_KT)) u_act (
+  initial begin
+    if (RD_DATA_W != 128 && RD_DATA_W != 256)
+      $fatal(1, "gemm_core: RD_DATA_W must be 128 or 256 (got %0d)", RD_DATA_W);
+  end
+
+  logic act_we, wgt_we, act_re, wgt_re;
+  logic [SADDR_W-1:0] act_waddr, wgt_waddr;
+  logic [SADDR_W-1:0] act_raddr, wgt_raddr;
+  logic [RD_DATA_W-1:0] act_word, wgt_word;   // SRAM 출력 (워드 전체)
+  logic [127:0] act_rdata, wgt_rdata;         // 선택된 K-step 하나
+
+  act_sram #(.MAX_KT(MAX_KT), .DATA_W(RD_DATA_W), .DEPTH(SRAM_DEPTH)) u_act (
     .clk(clk), .rst_n(rst_n),
     .we(act_we), .re(act_re),
     .waddr(act_waddr), .wdata(rd_data),
-    .raddr(act_raddr), .rdata(act_rdata)
+    .raddr(act_raddr), .rdata(act_word)
   );
 
-  wgt_sram #(.MAX_KT(MAX_KT)) u_wgt (
+  wgt_sram #(.MAX_KT(MAX_KT), .DATA_W(RD_DATA_W), .DEPTH(SRAM_DEPTH)) u_wgt (
     .clk(clk), .rst_n(rst_n),
     .we(wgt_we), .re(wgt_re),
     .waddr(wgt_waddr), .wdata(rd_data),
-    .raddr(wgt_raddr), .rdata(wgt_rdata)
+    .raddr(wgt_raddr), .rdata(wgt_word)
   );
 
-  logic [ADDR_W-1:0] load_idx;
+  logic [SADDR_W-1:0] load_idx;   // 수신 비트 = SRAM 워드 인덱스
 
   // ✅ hold read address at "last issued" k to avoid reading past Kt (Kt=1 → addr would become 1 and go X)
   logic [ADDR_W-1:0] rd_k_r;
   // ✅ IMPORTANT: SRAM is sync-read. If we update rd_k_r at posedge, the same posedge read would still see OLD rd_k_r.
   // So, when issuing a new k, drive SRAM raddr directly from issue_k_addr in that cycle.
   logic [ADDR_W-1:0] rd_k_mux;
-  assign act_raddr = rd_k_mux;
-  assign wgt_raddr = rd_k_mux;
+
+  // K 인덱스를 (워드 주소, 워드 내 위치) 로 나눈다.
+  // SRAM 은 동기 읽기라 rdata 가 한 사이클 뒤에 나온다. 따라서 슬라이스에
+  // 쓸 위치도 주소를 낸 그 사이클의 값을 한 사이클 지연시켜 써야 한다.
+  logic [KPW_W-1:0] rd_half, rd_half_q;
+
+  generate
+    if (KPW == 1) begin : G_W128
+      assign act_raddr = rd_k_mux[SADDR_W-1:0];
+      assign wgt_raddr = rd_k_mux[SADDR_W-1:0];
+      assign rd_half   = '0;
+      assign act_rdata = act_word;
+      assign wgt_rdata = wgt_word;
+    end else begin : G_WIDE
+      assign act_raddr = rd_k_mux[KPW_W +: SADDR_W];
+      assign wgt_raddr = rd_k_mux[KPW_W +: SADDR_W];
+      assign rd_half   = rd_k_mux[KPW_W-1:0];
+      assign act_rdata = act_word[rd_half_q*128 +: 128];
+      assign wgt_rdata = wgt_word[rd_half_q*128 +: 128];
+    end
+  endgenerate
+
+  // SRAM 이 re=0 일 때 rdata 를 유지하므로, 슬라이스 위치도 같이 유지한다.
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n)       rd_half_q <= '0;
+    else if (act_re)  rd_half_q <= rd_half;
+  end
   // ----------------------------
   // MAC array
   // ----------------------------
@@ -256,8 +311,16 @@ endgenerate
   logic [ADDR_W-1:0] issue_k_addr_trunc;
   assign issue_k_addr_trunc = issue_k_addr[ADDR_W-1:0];
 
-  // ✅ mac_en = valid (1-cycle after issue_fire, because SRAM rdata becomes stable after the issue edge)
-  assign mac_en = mac_en_d2;
+  // 피연산자는 발행 1사이클 뒤에 SRAM 출력에 나온다. MAC 은 그 사이클에
+  // 먹어야 한다.
+  //
+  // 원래는 여기에 mac_en_d1/d2 두 단을 더 거쳐 발행 3사이클 뒤였다.
+  // SRAM 출력은 다음 읽기 전까지 "유지" 되므로, 연속 발행하면 피연산자는
+  // t+1 부터 매 사이클 넘어가는데 MAC 은 t+3 부터 먹기 시작한다.
+  // 결과적으로 앞쪽 K-step 을 놓치고 마지막 것을 중복 누적한다.
+  // Kt=1 에서는 피연산자가 하나뿐이라 우연히 맞아서 드러나지 않았다
+  // (test_gemm_top.py 는 Kt=1 만 돌린다).
+  assign mac_en = act_issue_d & wgt_issue_d;
 
 always_ff @(posedge clk or negedge rst_n) begin
   if (!rst_n) begin
@@ -273,7 +336,7 @@ always_ff @(posedge clk or negedge rst_n) begin
     act_issue_d <= issue_fire;
     wgt_issue_d <= issue_fire;
 
-    // 2-cycle delay: MAC result valid
+    // mac_en_d1/d2 는 더 이상 쓰지 않는다 (위 주석 참조).
     mac_en_d1 <= act_issue_d & wgt_issue_d;
     mac_en_d2 <= mac_en_d1;
 
@@ -287,7 +350,7 @@ always_ff @(posedge clk or negedge rst_n) begin
         issue_k_addr <= issue_k_addr + 1;
       end
 
-      if (mac_en_d2)
+      if (mac_en)
         issue_k_mac <= issue_k_mac + 1;
     end
   end

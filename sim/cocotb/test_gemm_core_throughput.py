@@ -10,7 +10,10 @@ import numpy as np
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
 
+import os
 from dma_stub import SimpleMem, start_dma
+
+RD_BEAT = int(os.environ.get("RD_BEAT_BYTES", "16"))
 
 VERBOSE = False
 
@@ -43,7 +46,7 @@ async def boot(dut):
 
 async def stream(dut, Kt: int, n_ops: int) -> dict:
     mem = SimpleMem()
-    start_dma(dut, mem, log=False)
+    start_dma(dut, mem, log=False, rd_beat_bytes=RD_BEAT, wr_beat_bytes=16)
 
     A = np.random.randint(-128, 128, size=(16, max(Kt, 1)), dtype=np.int8)
     B = np.random.randint(-128, 128, size=(max(Kt, 1), 16), dtype=np.int8)
