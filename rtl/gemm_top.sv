@@ -5,7 +5,8 @@ module gemm_top #(
   parameter int MAX_KT = 256,
   // DMA 읽기 폭 (128 또는 256). gemm_core 로 그대로 내려간다.
   // spec/memory-bandwidth-analysis.md 참조.
-  parameter int RD_DATA_W = 128
+  parameter int RD_DATA_W = 128,
+  parameter int BANKS     = 2
 )(
   input  logic        clk,
   input  logic        rst_n,
@@ -124,7 +125,7 @@ module gemm_top #(
   // -------------------------
   // GEMM CORE
   // -------------------------
-  gemm_core #(.MAX_KT(MAX_KT), .RD_DATA_W(RD_DATA_W)) u_core (
+  gemm_core #(.MAX_KT(MAX_KT), .RD_DATA_W(RD_DATA_W), .BANKS(BANKS)) u_core (
     .clk(clk),
     .rst_n(rst_n),
 

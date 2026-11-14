@@ -11,8 +11,6 @@ from cocotb.triggers import RisingEdge, Timer
 
 from dma_stub import SimpleMem, start_dma
 
-STATE = ["IDLE", "RD_ACT_REQ", "RD_ACT_RECV", "RD_WGT_REQ", "RD_WGT_RECV",
-         "ACC_CLR", "COMPUTE", "POST_MAC", "LATCH"]
 import os
 RD_BEAT_BYTES = int(os.environ.get("RD_BEAT_BYTES", "32"))  # RD_DATA_W/8
 

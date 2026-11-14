@@ -28,7 +28,8 @@ async def wait_sig_high(dut, sig, max_cycles, name):
 async def log_core_signals(dut, cycles=200):
     dut._log.info("=== START CORE SIGNAL TRACE ===")
     for c in range(cycles):
-        st = int(dut.u_core.st.value)
+        cst = int(dut.u_core.cst.value)
+        lst = int(dut.u_core.lst.value)
 
         def fmt128(sig):
             bs = sig.value.binstr.lower()
@@ -54,7 +55,7 @@ async def log_core_signals(dut, cycles=200):
 
         dut._log.info(
             f"[C{c:03d}] "
-            f"st={st:02d} "
+            f"lst={lst:1d} cst={cst:1d} "
             f"issue_k_addr={int(dut.u_core.issue_k_addr.value):02d} "
             f"issue_k_mac={int(dut.u_core.issue_k_mac.value):02d} | "
             f"act_issue={int(dut.u_core.act_issue.value)} "

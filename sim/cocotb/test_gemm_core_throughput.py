@@ -17,8 +17,8 @@ RD_BEAT = int(os.environ.get("RD_BEAT_BYTES", "16"))
 
 VERBOSE = False
 
-STATE = ["IDLE", "RD_ACT_REQ", "RD_ACT_RECV", "RD_WGT_REQ", "RD_WGT_RECV",
-         "ACC_CLR", "COMPUTE", "POST_MAC", "LATCH"]
+CSTATE = ["C_IDLE", "C_CLR", "C_COMPUTE", "C_POST", "C_LATCH"]
+LSTATE = ["L_IDLE", "L_ACT_REQ", "L_ACT_RECV", "L_WGT_REQ", "L_WGT_RECV"]
 
 
 async def boot(dut):
@@ -87,7 +87,7 @@ async def stream(dut, Kt: int, n_ops: int) -> dict:
 
         if started:
             total += 1
-            if STATE[int(dut.st.value)] == "COMPUTE":
+            if CSTATE[int(dut.cst.value)] == "C_COMPUTE":
                 comp += 1
             if int(dut.done.value) == 1:
                 done_seen += 1
@@ -100,7 +100,8 @@ async def stream(dut, Kt: int, n_ops: int) -> dict:
     if done_seen != n_ops:
         dut._log.error(
             f"issued={issued} done={done_seen} total={total} "
-            f"st={STATE[int(dut.st.value)]} wst={int(dut.wst.value)} "
+            f"lst={LSTATE[int(dut.lst.value)]} cst={CSTATE[int(dut.cst.value)]} "
+            f"wst={int(dut.wst.value)} "
             f"cmd_ready={int(dut.cmd_ready.value)} busy={int(dut.busy.value)}")
     assert done_seen == n_ops, f"{done_seen}/{n_ops} 만 완료 (total={total})"
     return {"total": total, "compute": comp, "ops": n_ops}
@@ -132,4 +133,4 @@ async def test_core_streamed_throughput(dut):
                       f"{per:>9.1f} {util*100:>7.1f}%")
     dut._log.info("")
     dut._log.info("쓰기 FSM 이 분리돼 다음 디스크립터의 페치/연산과 겹친다.")
-    dut._log.info("페치는 아직 연산과 겹치지 않는다 — 피연산자 이중 버퍼링이 남았다.")
+    dut._log.info("피연산자 이중 버퍼링까지 들어가 페치도 연산과 겹친다.")

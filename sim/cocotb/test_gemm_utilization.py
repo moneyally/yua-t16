@@ -1,8 +1,9 @@
 """test_gemm_utilization.py — MAC 배열이 실제로 얼마나 일하는지 계측한다.
 
-gemm_core 의 FSM 은 ACT 읽기 → WGT 읽기 → 연산 → 쓰기 순으로 완전히
-직렬이다. 페치 동안 MAC 배열이 통째로 놀고, 연산 동안 DMA 가 논다.
-이 테스트는 상태별 사이클을 세어 그 비율을 숫자로 남긴다.
+gemm_core 는 로드(lst) / 연산(cst) / 쓰기(wst) 세 FSM 으로 나뉘어 서로
+다른 디스크립터를 동시에 처리한다. 이 테스트는 세 FSM 의 상태별 사이클을
+세어 겹침 비율을 숫자로 남긴다. 세 합이 전체를 넘는 것이 정상이고,
+그것이 바로 파이프라인이 돌고 있다는 증거다.
 
 측정만 하고 실패시키지 않는다 — 개선 전후를 같은 자로 재기 위한 기준선이다.
 """
@@ -13,12 +14,12 @@ from cocotb.triggers import RisingEdge, Timer
 
 from dma_stub import SimpleMem, start_dma
 
-# gemm_core.sv 의 state_t 순서
-# gemm_core.sv 의 state_t / wstate_t 순서
-STATE = ["IDLE", "RD_ACT_REQ", "RD_ACT_RECV", "RD_WGT_REQ", "RD_WGT_RECV",
-         "ACC_CLR", "COMPUTE", "POST_MAC", "LATCH"]
+# gemm_core.sv 의 lstate_t / cstate_t / wstate_t 순서
+LSTATE = ["L_IDLE", "L_ACT_REQ", "L_ACT_RECV", "L_WGT_REQ", "L_WGT_RECV"]
+CSTATE = ["C_IDLE", "C_CLR", "C_COMPUTE", "C_POST", "C_LATCH"]
 WSTATE = ["W_IDLE", "W_REQ", "W_SEND", "W_DONE"]
-FETCH = {"RD_ACT_REQ", "RD_ACT_RECV", "RD_WGT_REQ", "RD_WGT_RECV"}
+FETCH = {"L_ACT_REQ", "L_ACT_RECV", "L_WGT_REQ", "L_WGT_RECV"}
+ALL_STATES = LSTATE + CSTATE + WSTATE
 
 
 def u32_le(x): return int(x).to_bytes(4, "little", signed=False)
@@ -62,19 +63,20 @@ async def run_gemm(dut, Kt: int) -> dict:
     await RisingEdge(dut.clk)
     dut.desc_valid.value = 0
 
-    counts = {s: 0 for s in STATE}
-    counts.update({s: 0 for s in WSTATE})
+    counts = {s: 0 for s in ALL_STATES}
     total = 0
     seen_work = False
     for _ in range(200_000):
         await RisingEdge(dut.clk)
-        st = STATE[int(dut.u_core.st.value)]
+        lst = LSTATE[int(dut.u_core.lst.value)]
+        cst = CSTATE[int(dut.u_core.cst.value)]
         wst = WSTATE[int(dut.u_core.wst.value)]
-        idle = (st == "IDLE") and (wst == "W_IDLE")
+        idle = (lst == "L_IDLE") and (cst == "C_IDLE") and (wst == "W_IDLE")
         if not idle:
             seen_work = True
         if seen_work:
-            counts[st] += 1
+            counts[lst] += 1
+            counts[cst] += 1
             counts[wst] += 1
             total += 1
         if seen_work and idle:
@@ -114,7 +116,7 @@ async def test_utilization_profile(dut):
     for Kt in (1, 4, 16, 64):
         c = await run_gemm(dut, Kt)
         total = c["_total"]
-        comp = c["COMPUTE"]
+        comp = c["C_COMPUTE"]
         fetch = sum(c[s] for s in FETCH)
         write = c["W_REQ"] + c["W_SEND"]
         util = comp / total if total else 0.0
@@ -123,9 +125,9 @@ async def test_utilization_profile(dut):
         assert total > 0, f"Kt={Kt}: FSM 이 움직이지 않았다"
 
     dut._log.info("")
-    dut._log.info("쓰기는 별도 FSM(wst)이라 메인 FSM 과 겹쳐 돈다. 합이 전체를")
-    dut._log.info("넘는 것은 그 때문이고 정상이다.")
-    dut._log.info("페치는 아직 연산과 겹치지 않는다 — 피연산자 이중 버퍼링이 남았다.")
+    dut._log.info("로드/연산/쓰기가 각각 다른 디스크립터를 동시에 처리하므로")
+    dut._log.info("세 합이 전체를 넘는다. 디스크립터 하나만 돌리면 겹칠 상대가")
+    dut._log.info("없어 여기서는 직렬처럼 보인다 — 처리량은 아래 스트림 테스트에서 잰다.")
 
 
 async def run_gemm_stream(dut, Kt: int, n_ops: int) -> dict:
@@ -183,7 +185,7 @@ async def run_gemm_stream(dut, Kt: int, n_ops: int) -> dict:
 
         if started:
             total += 1
-            if STATE[int(dut.u_core.st.value)] == "COMPUTE":
+            if CSTATE[int(dut.u_core.cst.value)] == "C_COMPUTE":
                 comp += 1
             if int(dut.done_pulse.value) == 1:
                 done_seen += 1

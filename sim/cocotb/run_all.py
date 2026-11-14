@@ -32,6 +32,7 @@ OVERRIDES: dict[str, str] = {
     "test_fxp_arith":            "fxp_dut",
     "test_gemm_utilization":     "gemm_top",
     "test_gemm_core_throughput": "gemm_core",
+    "test_pipe_profile":         "gemm_core",
     "test_mxu128_kstep":         "mxu_bf16_128x128",
     "test_mac_array":            "mac_array",
     "test_gemm_int4":            "gemm_int4",
@@ -93,6 +94,9 @@ VARIANTS: dict[str, tuple[str, dict]] = {
     "test_mxu128_stream_rd": ("mxu_bf16_128x128",
                               {"PAR": 8, "FP32_OUT": 0, "STREAM_RD": 1}),
     "test_gemm_rd256":      ("gemm_top", {"RD_DATA_W": 256}),
+    # 정상상태 디스크립터 간격을 재는 프로파일. 256비트 쪽이 연산 한계에
+    # 닿는 구성이라 그쪽으로 등록한다 (128비트는 run_pipe_profile.py 로).
+    "test_pipe_profile":    ("gemm_core", {"RD_DATA_W": 256, "BANKS": 2}),
 }
 
 
