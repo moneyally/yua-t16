@@ -108,6 +108,12 @@ module gemm_core #(
   // 1 이면 WGT 페치를 건너뛰고 SRAM 에 상주한 가중치를 쓴다.
   // 가중치를 한 번도 적재하지 않았으면 무시된다 (아래 wgt_valid_r).
   input  logic        wgt_keep,
+  // 1 이면 이 디스크립터의 가중치가 INT4 로 패킹돼 있다.
+  // K-step 하나가 N 니블 = N/2 바이트이므로 가중치 트래픽이 절반이 된다.
+  // MAC 배열은 그대로 8비트를 받고, 니블을 부호확장해 넣는다.
+  // 포맷은 **상주 가중치에 딸린 속성**이다 — 건너뛴 디스크립터는 직전에
+  // 적재된 가중치의 포맷을 쓴다.
+  input  logic        wgt_int4,
 
   output logic        done,
   // 상주 가중치를 실제로 쓴 디스크립터 수 / 적재 횟수 (호스트 계측용)
@@ -164,6 +170,13 @@ module gemm_core #(
   localparam int KPW   = RD_DATA_W / KSTEP_W;
   localparam int KPW_W = (KPW > 1) ? $clog2(KPW) : 1;
 
+  // INT4 가중치: K-step 하나가 N 니블 = KSTEP_W/2 비트다. 따라서 워드에
+  // 두 배로 들어간다. KPW >= 1 이므로 W4PW >= 2 가 항상 성립하고,
+  // 주소/부분워드 분할이 비트 슬라이싱만으로 끝난다.
+  localparam int NIB_W   = KSTEP_W / 2;      // INT4 K-step 하나의 비트 수
+  localparam int W4PW    = KPW * 2;
+  localparam int W4PW_W  = $clog2(W4PW);
+
   // 뱅크 하나가 디스크립터 하나의 피연산자를 담는다.
   localparam int BANK_W      = $clog2(BANKS);              // 뱅크 인덱스 폭
   localparam int BANK_DEPTH  = (MAX_KT + KPW - 1) / KPW;   // 뱅크당 워드 수
@@ -184,6 +197,9 @@ module gemm_core #(
       $fatal(1, "gemm_core: RD_DATA_W (%0d) must be a positive multiple of TILE_N*8 (%0d)",
              RD_DATA_W, KSTEP_W);
     // 누산기 수가 쓰기 비트로 정수 개 나뉘어야 한다.
+    // INT4 니블이 바이트 경계에 맞아야 한다 (N 이 짝수).
+    if (N % 2 != 0)
+      $fatal(1, "gemm_core: TILE_N must be even for INT4 weights (got %0d)", N);
     if (OUT_BEATS * WPB != ACCS)
       $fatal(1, "gemm_core: TILE_N^2 (%0d) must be a multiple of WR_DATA_W/32 (%0d)",
              ACCS, WPB);
@@ -249,7 +265,8 @@ module gemm_core #(
   wire [63:0] out_cm = out_bank[cm_bank];
 
   logic [63:0] act_base_r, wgt_base_r;
-  logic [15:0] rd_len_r;
+  logic [15:0] rd_len_r;    // 활성값 (INT8)
+  logic [15:0] wgt_len_r;   // 가중치 (INT8 또는 INT4)
 
   // ── Weight-stationary 상태 ──────────────────────────────────────
   // 가중치를 한 번이라도 적재했는가. 적재 전에는 wgt_keep 을 무시해야
@@ -273,6 +290,13 @@ module gemm_core #(
   logic [BANK_W-1:0] wgt_bank_of [0:BANKS-1];
   wire  [BANK_W-1:0] wgt_bank_cm = wgt_bank_of[cm_bank];
 
+  // INT4 여부는 상주 가중치의 속성이므로 가중치 뱅크마다 보관한다.
+  // 건너뛴 디스크립터는 wgt_bank_of 가 가리키는 뱅크의 포맷을 쓴다.
+  logic w4_of_wbank [0:BANKS-1];
+  wire  w4_cm = w4_of_wbank[wgt_bank_cm];
+  // 로드 FSM 이 지금 적재 중인 가중치의 포맷
+  logic w4_ld_r;
+
   // 로드 FSM 은 자기 뱅크가 비어 있을 때만 명령을 받는다.
   // 가중치 교체는 드레인을 요구하지 않는다 (위 증명).
   assign cmd_ready = (lst == L_IDLE) && !bank_full[ld_bank];
@@ -295,8 +319,11 @@ module gemm_core #(
       wgt_load_r  <= 32'd0;
       wld_bank    <= '0;
       wres_bank   <= '0;
-      for (wi = 0; wi < BANKS; wi = wi + 1)
-        wgt_bank_of[wi] <= '0;
+      w4_ld_r     <= 1'b0;
+      for (wi = 0; wi < BANKS; wi = wi + 1) begin
+        wgt_bank_of[wi]  <= '0;
+        w4_of_wbank[wi]  <= 1'b0;
+      end
     end else if (cmd_accept) begin
       wgt_skip_r <= wgt_skip;
       if (wgt_skip) begin
@@ -309,6 +336,8 @@ module gemm_core #(
         // wgt_valid_r 은 지금 세워도 된다. 이것을 보고 건너뛸 수 있는
         // 디스크립터는 lst==L_IDLE 을 기다리므로 이 적재가 끝난 뒤다.
         wgt_bank_of[ld_bank] <= wld_bank;
+        w4_of_wbank[wld_bank] <= wgt_int4;
+        w4_ld_r              <= wgt_int4;
         wgt_valid_r          <= 1'b1;
         wgt_load_r           <= wgt_load_r + 1;
       end
@@ -326,6 +355,7 @@ module gemm_core #(
       act_base_r <= 64'd0;
       wgt_base_r <= 64'd0;
       rd_len_r   <= 16'd0;
+      wgt_len_r  <= 16'd0;
       for (bi = 0; bi < BANKS; bi = bi + 1) begin
         Kt_bank[bi]  <= 32'd0;
         out_bank[bi] <= 64'd0;
@@ -339,6 +369,10 @@ module gemm_core #(
       // 요청한다. 남는 절반은 뱅크 마지막 워드의 상위에 들어가고
       // 연산은 k < Kt 만 읽으므로 사용되지 않는다.
       rd_len_r   <= 16'(((clamp_kt(Kt) + KPW - 1) / KPW) * RD_BEAT_B);
+      // INT4 면 워드에 K-step 이 두 배 들어가므로 요청 길이가 절반이 된다.
+      wgt_len_r  <= wgt_int4
+                  ? 16'(((clamp_kt(Kt) + W4PW - 1) / W4PW) * RD_BEAT_B)
+                  : 16'(((clamp_kt(Kt) + KPW  - 1) / KPW ) * RD_BEAT_B);
 
       Kt_bank[ld_bank]  <= clamp_kt(Kt);
       out_bank[ld_bank] <= out_addr;
@@ -434,28 +468,66 @@ module gemm_core #(
   // K 인덱스를 (뱅크 내 워드 주소, 워드 내 위치) 로 나눈다.
   // SRAM 은 동기 읽기라 rdata 가 한 사이클 뒤에 나온다. 따라서 슬라이스에
   // 쓸 위치도 주소를 낸 그 사이클의 값을 한 사이클 지연시켜 써야 한다.
-  logic [KPW_W-1:0] rd_half, rd_half_q;
+  logic [KPW_W-1:0]  rd_half, rd_half_q;      // INT8 부분워드 위치
+  logic [W4PW_W-1:0] w4_sub,  w4_sub_q;       // INT4 부분워드 위치
+
+  logic [BADDR_W-1:0]  wgt_wa8;               // INT8 가중치 워드 주소
+  logic [KSTEP_W-1:0]  wgt_rdata_i8;          // INT8 경로 결과
+  logic [KSTEP_W-1:0]  wgt_rdata_i4;          // INT4 경로 결과 (부호확장 후)
 
   generate
     if (KPW == 1) begin : G_W128
-      assign act_raddr = {cm_bank, rd_k_mux[BADDR_W-1:0]};
-      assign wgt_raddr = {wgt_bank_cm, rd_k_mux[BADDR_W-1:0]};
-      assign rd_half   = '0;
-      assign act_rdata = act_word;
-      assign wgt_rdata = wgt_word;
+      assign act_raddr    = {cm_bank, rd_k_mux[BADDR_W-1:0]};
+      assign wgt_wa8      = rd_k_mux[BADDR_W-1:0];
+      assign rd_half      = '0;
+      assign act_rdata    = act_word;
+      assign wgt_rdata_i8 = wgt_word;
     end else begin : G_WIDE
-      assign act_raddr = {cm_bank, rd_k_mux[KPW_W +: BADDR_W]};
-      assign wgt_raddr = {wgt_bank_cm, rd_k_mux[KPW_W +: BADDR_W]};
-      assign rd_half   = rd_k_mux[KPW_W-1:0];
-      assign act_rdata = act_word[rd_half_q*KSTEP_W +: KSTEP_W];
-      assign wgt_rdata = wgt_word[rd_half_q*KSTEP_W +: KSTEP_W];
+      assign act_raddr    = {cm_bank, rd_k_mux[KPW_W +: BADDR_W]};
+      assign wgt_wa8      = rd_k_mux[KPW_W +: BADDR_W];
+      assign rd_half      = rd_k_mux[KPW_W-1:0];
+      assign act_rdata    = act_word[rd_half_q*KSTEP_W +: KSTEP_W];
+      assign wgt_rdata_i8 = wgt_word[rd_half_q*KSTEP_W +: KSTEP_W];
     end
   endgenerate
 
+  // INT4 경로. W4PW >= 2 가 항상 성립하므로 분기가 필요 없다.
+  assign w4_sub = rd_k_mux[W4PW_W-1:0];
+
+  // 가중치 주소는 포맷에 따라 다르다 — INT4 면 K-step 두 개가 한 워드에
+  // 더 들어가므로 K 인덱스를 한 비트 더 오른쪽으로 민다.
+  //
+  // 부분선택 `rd_k_mux[W4PW_W +: BADDR_W]` 로 쓰면 범위를 넘는다:
+  // N=16/RD=128 에서 rd_k_mux 는 8비트인데 BADDR_W 도 8 이라 [8:1] 이
+  // 된다. 시프트 후 하위 BADDR_W 비트를 취하면 폭에 무관하게 맞는다.
+  // Kt <= MAX_KT 이므로 k/W4PW 는 BANK_DEPTH 를 넘지 않는다.
+  wire [ADDR_W-1:0]   w4_word_idx = rd_k_mux >> W4PW_W;
+  wire [BADDR_W-1:0]  wgt_wa4     = w4_word_idx[BADDR_W-1:0];
+
+  assign wgt_raddr = {wgt_bank_cm, w4_cm ? wgt_wa4 : wgt_wa8};
+
+  // 니블 N 개를 꺼내 8비트로 부호확장한다. INT4 는 2의 보수 [-8, 7] 이다.
+  wire [NIB_W-1:0] w4_nibbles = wgt_word[w4_sub_q*NIB_W +: NIB_W];
+
+  genvar nb;
+  generate
+    for (nb = 0; nb < N; nb++) begin : NIB_SEXT
+      assign wgt_rdata_i4[8*nb +: 8] =
+        {{4{w4_nibbles[4*nb + 3]}}, w4_nibbles[4*nb +: 4]};
+    end
+  endgenerate
+
+  assign wgt_rdata = w4_cm ? wgt_rdata_i4 : wgt_rdata_i8;
+
   // SRAM 이 re=0 일 때 rdata 를 유지하므로, 슬라이스 위치도 같이 유지한다.
   always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n)       rd_half_q <= '0;
-    else if (act_re)  rd_half_q <= rd_half;
+    if (!rst_n) begin
+      rd_half_q <= '0;
+      w4_sub_q  <= '0;
+    end else if (act_re) begin
+      rd_half_q <= rd_half;
+      w4_sub_q  <= w4_sub;
+    end
   end
 
   // ----------------------------
@@ -713,8 +785,10 @@ end
       end
 
       L_WGT_REQ: begin
-        rd_req_valid = 1'b1;
-        rd_req_addr  = wgt_base_r;
+        rd_req_valid     = 1'b1;
+        rd_req_addr      = wgt_base_r;
+        // 가중치는 INT4 면 절반만 읽는다.
+        rd_req_len_bytes = wgt_len_r;
         if (rd_req_ready) lst_n = L_WGT_RECV;
       end
 

@@ -37,6 +37,8 @@ OVERRIDES: dict[str, str] = {
     "test_desc_handshake":       "gemm_top",
     "test_wr256":                "gemm_top",
     "test_tile16":               "gemm_top",
+    "test_int4_weights":         "gemm_top",
+    "test_int4_n32":             "gemm_top",
     "test_mxu128_kstep":         "mxu_bf16_128x128",
     "test_mac_array":            "mac_array",
     "test_gemm_int4":            "gemm_int4",
@@ -105,6 +107,8 @@ VARIANTS: dict[str, tuple[str, dict]] = {
     # 32x32 타일은 K-step 이 32바이트라 읽기 폭 256비트를 요구하고,
     # 출력이 N²=1,024 개라 쓰기도 256비트여야 균형이 맞는다.
     "test_tile32":          ("gemm_top", {"TILE_N": 32, "RD_DATA_W": 256,
+                                          "WR_DATA_W": 256}),
+    "test_int4_n32":        ("gemm_top", {"TILE_N": 32, "RD_DATA_W": 256,
                                           "WR_DATA_W": 256}),
 }
 

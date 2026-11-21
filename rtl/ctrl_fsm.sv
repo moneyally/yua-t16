@@ -37,6 +37,8 @@ module ctrl_fsm #(
   // 디스크립터 바이트 1 (flags) bit0: 가중치 재적재 생략.
   // 바이트 0 은 opcode, 2~15 는 예약, 16~43 은 주소/Kt, 63 은 CRC 다.
   output logic        wgt_keep,
+  // flags bit1: 가중치가 INT4 로 패킹돼 있다.
+  output logic        wgt_int4,
 
   input  logic        core_done,
   output logic        busy,
@@ -125,6 +127,7 @@ module ctrl_fsm #(
   end
 
   localparam int FLAG_WGT_KEEP = 0;
+  localparam int FLAG_WGT_INT4 = 1;
 
   wire issue      = (state == ST_DISPATCH) && cmd_ready;
   wire local_done = (state == ST_DONE);
@@ -168,6 +171,7 @@ module ctrl_fsm #(
     out_addr = out_addr_r;
     Kt       = Kt_r;
     wgt_keep = flags_r[FLAG_WGT_KEEP];
+    wgt_int4 = flags_r[FLAG_WGT_INT4];
 
     case (state)
       ST_IDLE: begin

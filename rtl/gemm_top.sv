@@ -61,10 +61,12 @@ module gemm_top #(
   logic [63:0] act_addr_c, wgt_addr_c, out_addr_c;
   logic [31:0] Kt_c;
   logic        wgt_keep_c;
+  logic        wgt_int4_c;
 
   logic [63:0] act_addr_r, wgt_addr_r, out_addr_r;
   logic [31:0] Kt_r;
   logic        wgt_keep_r;
+  logic        wgt_int4_r;
 
   logic        core_done;
   logic        core_done_r;
@@ -91,6 +93,7 @@ module gemm_top #(
     .out_addr(out_addr_c),
     .Kt(Kt_c),
     .wgt_keep(wgt_keep_c),
+    .wgt_int4(wgt_int4_c),
 
     .core_done(core_done_r),
     .busy(ctrl_busy),
@@ -111,6 +114,7 @@ module gemm_top #(
       out_addr_r  <= 64'd0;
       Kt_r        <= 32'd0;
       wgt_keep_r  <= 1'b0;
+      wgt_int4_r  <= 1'b0;
     end else begin
       // latch new command if we don't already have one pending
       if (!cmd_valid_r && cmd_valid_c) begin
@@ -120,6 +124,7 @@ module gemm_top #(
         out_addr_r  <= out_addr_c;
         Kt_r        <= Kt_c;
         wgt_keep_r  <= wgt_keep_c;
+        wgt_int4_r  <= wgt_int4_c;
       end
       // drop when core accepts
       else if (cmd_valid_r && cmd_ready_core) begin
@@ -147,6 +152,7 @@ module gemm_top #(
     .out_addr(out_addr_r),
     .Kt(Kt_r),
     .wgt_keep(wgt_keep_r),
+    .wgt_int4(wgt_int4_r),
 
     .done(core_done),
 
