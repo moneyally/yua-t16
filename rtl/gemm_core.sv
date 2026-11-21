@@ -75,7 +75,26 @@ module gemm_core #(
   // 4 면 로드가 두 디스크립터만큼 앞서갈 수 있어 핸드셰이크 지연이
   // 흡수된다. 값은 SRAM 깊이만 늘린다 (플립플롭이 아니라 BRAM).
   // spec/memory-bandwidth-analysis.md 참조.
-  parameter int BANKS = 2
+  parameter int BANKS = 2,
+
+  // DMA 쓰기 데이터 폭. 128 또는 256.
+  //
+  // 디스크립터당 출력은 타일 크기의 제곱(N²)이고 연산은 Kt 사이클이다.
+  // N=16/Kt=64 에서는 쓰기 64 비트 vs 연산 64 사이클로 균형이 맞지만,
+  // 타일을 키우면 출력이 N² 로 커져 쓰기가 묶는 쪽이 된다.
+  // 이 파라미터로 그쪽도 맞춘다.
+  parameter int WR_DATA_W = 128,
+
+  // MAC 타일 한 변의 길이. MAC 은 N², 피연산자 바이트는 N 이므로
+  // 산술 강도가 N 에 비례한다.
+  //
+  // N=16 / RD=256 / WS 에서 로드 채널이 45.5% 만 바빠 2.19× 여유가
+  // 있었다. N=32 는 MAC 4배, 피연산자 2배이므로 그 여유를 정확히
+  // 소진한다. 다만 출력이 N² 로 커지므로 WR_DATA_W 도 맞춰야 한다.
+  //
+  // 제약: RD_DATA_W 가 한 K-step (N 바이트) 의 배수여야 한다.
+  // 즉 N=32 는 RD_DATA_W >= 256 을 요구한다.
+  parameter int TILE_N = 16
 )(
   input  logic clk,
   input  logic rst_n,
@@ -116,7 +135,7 @@ module gemm_core #(
 
   output logic         wr_data_valid,
   input  logic         wr_data_ready,
-  output logic [127:0] wr_data,
+  output logic [WR_DATA_W-1:0] wr_data,
   output logic         wr_data_last,
 
   output logic [31:0]  perf_cycles,
@@ -129,11 +148,20 @@ module gemm_core #(
   // 치수
   // ----------------------------
   localparam int ADDR_W    = $clog2(MAX_KT);
-  localparam int OUT_BEATS = 64;      // 1024 / 16
-  localparam int OUT_BYTES = 1024;
+
+  localparam int N          = TILE_N;
+  localparam int ACCS       = N * N;                  // 누산기 수
+  localparam int KSTEP_W    = N * 8;                  // K-step 하나의 비트 수
+  // 쓰기 비트 하나에 실리는 누산기 개수와 디스크립터당 비트 수
+  localparam int WPB        = WR_DATA_W / 32;         // 비트당 누산기
+  localparam int OUT_BEATS  = ACCS / WPB;
+  localparam int OUT_BYTES  = ACCS * 4;
+  localparam int BEAT_W     = $clog2(OUT_BEATS + 1);
+  localparam int WR_BEAT_B  = WR_DATA_W / 8;          // 비트당 바이트
+  localparam int RD_BEAT_B  = RD_DATA_W / 8;
 
   // 워드 하나에 들어가는 K-step 수
-  localparam int KPW   = RD_DATA_W / 128;              // 1 또는 2
+  localparam int KPW   = RD_DATA_W / KSTEP_W;
   localparam int KPW_W = (KPW > 1) ? $clog2(KPW) : 1;
 
   // 뱅크 하나가 디스크립터 하나의 피연산자를 담는다.
@@ -149,6 +177,16 @@ module gemm_core #(
     // 뱅크 인덱스를 주소 상위에 그냥 붙이므로 2의 거듭제곱이어야 한다.
     if (BANKS < 2 || (BANKS & (BANKS - 1)) != 0)
       $fatal(1, "gemm_core: BANKS must be a power of two >= 2 (got %0d)", BANKS);
+    if (WR_DATA_W != 128 && WR_DATA_W != 256)
+      $fatal(1, "gemm_core: WR_DATA_W must be 128 or 256 (got %0d)", WR_DATA_W);
+    // K-step 하나(N 바이트)가 읽기 비트에 정수 개 들어가야 한다.
+    if (KPW < 1 || KPW * KSTEP_W != RD_DATA_W)
+      $fatal(1, "gemm_core: RD_DATA_W (%0d) must be a positive multiple of TILE_N*8 (%0d)",
+             RD_DATA_W, KSTEP_W);
+    // 누산기 수가 쓰기 비트로 정수 개 나뉘어야 한다.
+    if (OUT_BEATS * WPB != ACCS)
+      $fatal(1, "gemm_core: TILE_N^2 (%0d) must be a multiple of WR_DATA_W/32 (%0d)",
+             ACCS, WPB);
   end
 
   function automatic logic [31:0] clamp_kt(input logic [31:0] in);
@@ -300,7 +338,7 @@ module gemm_core #(
       // 홀수면 Kt*16 바이트가 32 의 배수가 아니다. 워드 단위로 올림해
       // 요청한다. 남는 절반은 뱅크 마지막 워드의 상위에 들어가고
       // 연산은 k < Kt 만 읽으므로 사용되지 않는다.
-      rd_len_r   <= 16'(((clamp_kt(Kt) + KPW - 1) / KPW) * KPW * DMA_BEAT_BYTES);
+      rd_len_r   <= 16'(((clamp_kt(Kt) + KPW - 1) / KPW) * RD_BEAT_B);
 
       Kt_bank[ld_bank]  <= clamp_kt(Kt);
       out_bank[ld_bank] <= out_addr;
@@ -352,7 +390,7 @@ module gemm_core #(
       if (busy) cyc_r <= cyc_r + 1;
       bytes_r <= bytes_r
         + ((rd_data_valid && rd_data_ready) ? (RD_DATA_W/8) : 0)
-        + ((wr_data_valid && wr_data_ready) ? DMA_BEAT_BYTES : 0);
+        + ((wr_data_valid && wr_data_ready) ? WR_BEAT_B : 0);
     end
   end
 
@@ -365,7 +403,7 @@ module gemm_core #(
   logic [SADDR_W-1:0] wgt_waddr;
   logic [SADDR_W-1:0] wgt_raddr;
   logic [RD_DATA_W-1:0] act_word, wgt_word;   // SRAM 출력 (워드 전체)
-  logic [127:0] act_rdata, wgt_rdata;         // 선택된 K-step 하나
+  logic [KSTEP_W-1:0] act_rdata, wgt_rdata;   // 선택된 K-step 하나
 
   act_sram #(.MAX_KT(MAX_KT), .DATA_W(RD_DATA_W), .DEPTH(SRAM_DEPTH)) u_act (
     .clk(clk), .rst_n(rst_n),
@@ -409,8 +447,8 @@ module gemm_core #(
       assign act_raddr = {cm_bank, rd_k_mux[KPW_W +: BADDR_W]};
       assign wgt_raddr = {wgt_bank_cm, rd_k_mux[KPW_W +: BADDR_W]};
       assign rd_half   = rd_k_mux[KPW_W-1:0];
-      assign act_rdata = act_word[rd_half_q*128 +: 128];
-      assign wgt_rdata = wgt_word[rd_half_q*128 +: 128];
+      assign act_rdata = act_word[rd_half_q*KSTEP_W +: KSTEP_W];
+      assign wgt_rdata = wgt_word[rd_half_q*KSTEP_W +: KSTEP_W];
     end
   endgenerate
 
@@ -428,26 +466,26 @@ module gemm_core #(
   logic act_issue_d, wgt_issue_d;    // ✅ 1-cycle delayed valid (SRAM->MAC align)
   logic issue_fire;
 
-  logic signed [7:0]  a_row [0:15];
-  logic signed [7:0]  b_col [0:15];
+  logic signed [7:0]  a_row [0:N-1];
+  logic signed [7:0]  b_col [0:N-1];
 
 // MAC internal result as packed flat vector (Icarus-safe — no unpacked array output port)
-logic [32*256-1:0] acc_out_mac_flat;
+logic [32*ACCS-1:0] acc_out_mac_flat;
 
 // Unpacked views of MAC result and latched outputs for cocotb/FSM access
-logic signed [31:0] acc_out_mac [0:255];  // continuous unpack from acc_out_mac_flat
-logic signed [31:0] acc_out_flat [0:255]; // latch of mac result (reset-safe, Icarus-safe)
-logic signed [31:0] acc_out_lat  [0:255]; // write-out latch
+logic signed [31:0] acc_out_mac [0:ACCS-1];  // continuous unpack from acc_out_mac_flat
+logic signed [31:0] acc_out_flat [0:ACCS-1]; // latch of mac result (reset-safe, Icarus-safe)
+logic signed [31:0] acc_out_lat  [0:ACCS-1]; // write-out latch
 
   genvar i;
   generate
-    for (i=0;i<16;i++) begin : ROW_UNPACK
+    for (i=0;i<N;i++) begin : ROW_UNPACK
       assign a_row[i] = act_rdata[8*i +: 8];
       assign b_col[i] = wgt_rdata[8*i +: 8];
     end
   endgenerate
 
-mac_array u_mac (
+mac_array #(.N(N)) u_mac (
   .clk(clk),
   .rst_n(rst_n),
   .en(mac_en),
@@ -460,7 +498,7 @@ mac_array u_mac (
 // Unpack acc_out_mac_flat -> acc_out_mac[] via continuous assigns
 genvar ui;
 generate
-  for (ui = 0; ui < 256; ui++) begin : UNPACK_MAC
+  for (ui = 0; ui < ACCS; ui++) begin : UNPACK_MAC
     assign acc_out_mac[ui] = acc_out_mac_flat[ui*32 +: 32];
   end
 endgenerate
@@ -476,7 +514,7 @@ endgenerate
 // --------------------------------------------------
 genvar zz;
 generate
-  for (zz = 0; zz < 256; zz++) begin : GEN_ACC_FLAT
+  for (zz = 0; zz < ACCS; zz++) begin : GEN_ACC_FLAT
     always_ff @(posedge clk or negedge rst_n) begin
       if (!rst_n)
         acc_out_flat[zz] <= 32'sd0;
@@ -490,7 +528,7 @@ endgenerate
 
 genvar kk;
 generate
-  for (kk = 0; kk < 256; kk++) begin : GEN_ACC_LAT
+  for (kk = 0; kk < ACCS; kk++) begin : GEN_ACC_LAT
     always_ff @(posedge clk or negedge rst_n) begin
       // C_CLR 에서 지우지 않는다. 쓰기 FSM 이 분리되면서 다음 디스크립터가
       // C_CLR 에 도달할 때 아직 전송 중인 acc_out_lat 을 지워버리는
@@ -563,9 +601,9 @@ end
   // ----------------------------
   // Write datapath (X-safe + small)
   // ----------------------------
-  logic [6:0]   out_beat;
-  logic [127:0] wr_data_r;
-  logic         wr_valid_r;
+  logic [BEAT_W-1:0]      out_beat;
+  logic [WR_DATA_W-1:0]   wr_data_r;
+  logic                   wr_valid_r;
 
   function automatic logic [31:0] x32(input logic signed [31:0] v);
     logic [31:0] t;
@@ -578,34 +616,34 @@ end
     end
   endfunction
 
-  function automatic logic [127:0] pack4(input int base);
+  // 누산기 WPB 개를 한 비트로 묶는다. 하위 워드가 낮은 인덱스다
+  // (리틀엔디안 메모리 순서와 맞춘다).
+  function automatic logic [WR_DATA_W-1:0] pack_beat(input int base);
+    int w;
     begin
-      pack4 = {
-        x32(acc_out_lat[base+3]),
-        x32(acc_out_lat[base+2]),
-        x32(acc_out_lat[base+1]),
-        x32(acc_out_lat[base+0])
-      };
+      pack_beat = '0;
+      for (w = 0; w < WPB; w = w + 1)
+        pack_beat[w*32 +: 32] = x32(acc_out_lat[base + w]);
     end
   endfunction
 
 `ifdef COCOTB_SIM
   initial begin
-    out_beat   = 7'd0;
-    wr_data_r  = 128'd0;
+    out_beat   = '0;
+    wr_data_r  = '0;
     wr_valid_r = 1'b0;
   end
 `endif
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      out_beat   <= 7'd0;
-      wr_data_r  <= 128'd0;
+      out_beat   <= '0;
+      wr_data_r  <= '0;
       wr_valid_r <= 1'b0;
     end else begin
       if (wst == W_REQ && wr_req_ready) begin
-        out_beat   <= 7'd0;
-        wr_data_r  <= pack4(0);
+        out_beat   <= '0;
+        wr_data_r  <= pack_beat(0);
         wr_valid_r <= 1'b1;
       end else if (wst == W_SEND) begin
         if (wr_valid_r && wr_data_ready) begin
@@ -613,7 +651,7 @@ end
             wr_valid_r <= 1'b0;
           end else begin
             out_beat   <= out_beat + 1'b1;
-            wr_data_r  <= pack4((out_beat + 1) * 4);
+            wr_data_r  <= pack_beat((out_beat + 1) * WPB);
             wr_valid_r <= 1'b1;
           end
         end
@@ -781,7 +819,7 @@ end
   // 쓰기 FSM (DMA 쓰기 채널)
   // ----------------------------
   assign wr_req_addr      = wr_addr_r;
-  assign wr_req_len_bytes = 16'(OUT_BYTES);
+  assign wr_req_len_bytes = 16'(OUT_BYTES);   // N² × 4, 폭과 무관
 
   always_comb begin
     wst_n        = wst;

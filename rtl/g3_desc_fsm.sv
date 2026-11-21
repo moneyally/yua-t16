@@ -229,9 +229,16 @@ module g3_desc_fsm #(
   // ═══════════════════════════════════════════════════════════
   // Latch descriptor
   // ═══════════════════════════════════════════════════════════
+  // 디스크립터는 핸드셰이크가 일어난 사이클에 캡처한다. desc_ready 는
+  // ST_IDLE 에서 서므로 ST_LATCH 는 그 다음 사이클이고, 그때 읽으면
+  // 호스트가 valid && ready 이후에도 desc_bytes 를 한 사이클 더 들고
+  // 있어야 한다 — AXI-Stream 규약 위반이다. ctrl_fsm.sv 에 같은 버그가
+  // 있었고 거기에 자세히 적었다.
+  wire desc_accept = desc_valid & desc_ready;
+
   integer i;
   always_ff @(posedge clk) begin
-    if (state == ST_LATCH)
+    if (desc_accept)
       for (i = 0; i < DESC_SIZE; i = i + 1)
         latched[i] <= desc_bytes[i];
   end

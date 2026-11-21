@@ -85,9 +85,22 @@ module ctrl_fsm #(
     else        state <= state_n;
   end
 
+  // 디스크립터는 **핸드셰이크가 일어난 사이클**에 캡처한다.
+  //
+  // 원래는 `state == ST_LATCH` 일 때 desc_bytes 를 읽었다. desc_ready 는
+  // ST_IDLE 에서 서므로 핸드셰이크는 ST_IDLE 에서 일어나고, ST_LATCH 는
+  // 그 다음 사이클이다. 즉 호스트가 valid && ready 이후에도 desc_bytes 를
+  // 한 사이클 더 들고 있어야 했다 — AXI-Stream 규약 위반이다.
+  // 규약을 지키는 호스트(핸드셰이크 직후 다음 디스크립터를 올리는 호스트)는
+  // 이전 디스크립터 자리에 **다음** 디스크립터의 바이트를 넣게 된다.
+  //
+  // 디스크립터를 하나씩만 보내면 드러나지 않는다. 연속으로 밀어 넣을 때만
+  // 틀리고, 그때는 결과가 엉뚱한 주소에 쓰여 조용히 0 이 남는다.
+  wire desc_accept = desc_valid & desc_ready;
+
   integer i;
   always_ff @(posedge clk) begin
-    if (state == ST_LATCH) begin
+    if (desc_accept) begin
       for (i = 0; i < DESC_SIZE; i = i + 1)
         latched[i] <= desc_bytes[i];
     end

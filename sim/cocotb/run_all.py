@@ -34,6 +34,9 @@ OVERRIDES: dict[str, str] = {
     "test_gemm_core_throughput": "gemm_core",
     "test_pipe_profile":         "gemm_core",
     "test_weight_stationary":    "gemm_top",
+    "test_desc_handshake":       "gemm_top",
+    "test_wr256":                "gemm_top",
+    "test_tile16":               "gemm_top",
     "test_mxu128_kstep":         "mxu_bf16_128x128",
     "test_mac_array":            "mac_array",
     "test_gemm_int4":            "gemm_int4",
@@ -98,6 +101,11 @@ VARIANTS: dict[str, tuple[str, dict]] = {
     # 정상상태 디스크립터 간격을 재는 프로파일. 256비트 쪽이 연산 한계에
     # 닿는 구성이라 그쪽으로 등록한다 (128비트는 run_pipe_profile.py 로).
     "test_pipe_profile":    ("gemm_core", {"RD_DATA_W": 256, "BANKS": 2}),
+    "test_wr256":           ("gemm_top", {"WR_DATA_W": 256}),
+    # 32x32 타일은 K-step 이 32바이트라 읽기 폭 256비트를 요구하고,
+    # 출력이 N²=1,024 개라 쓰기도 256비트여야 균형이 맞는다.
+    "test_tile32":          ("gemm_top", {"TILE_N": 32, "RD_DATA_W": 256,
+                                          "WR_DATA_W": 256}),
 }
 
 
