@@ -39,6 +39,7 @@ OVERRIDES: dict[str, str] = {
     "test_tile16":               "gemm_top",
     "test_int4_weights":         "gemm_top",
     "test_int4_n32":             "gemm_top",
+    "test_tile64":               "gemm_top",
     "test_mxu128_kstep":         "mxu_bf16_128x128",
     "test_mac_array":            "mac_array",
     "test_gemm_int4":            "gemm_int4",
@@ -110,6 +111,9 @@ VARIANTS: dict[str, tuple[str, dict]] = {
                                           "WR_DATA_W": 256}),
     "test_int4_n32":        ("gemm_top", {"TILE_N": 32, "RD_DATA_W": 256,
                                           "WR_DATA_W": 256}),
+    # 64x64 는 ASIC 급 설계점. 단일 VC1902 에는 들어가지 않는다.
+    "test_tile64":          ("gemm_top", {"TILE_N": 64, "RD_DATA_W": 512,
+                                          "WR_DATA_W": 512}),
 }
 
 

@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 r = get_runner("verilator")
 r.build(sources=deps("gemm_top"), hdl_toplevel="gemm_top",
         build_args=["--timing","-Wno-fatal","--public-flat-rw",
-                    "-Wno-WIDTHEXPAND","-Wno-TIMESCALEMOD","--unroll-count","4096"],
+                    "-Wno-WIDTHEXPAND","-Wno-TIMESCALEMOD","--unroll-count","16384"],
         build_dir=ROOT/"sim_build"/"build"/"gemm_top", always=False)
 sys.path.insert(0, str(ROOT/"sim/cocotb"))
 res = ROOT/"sim_build"/"results"; res.mkdir(parents=True, exist_ok=True)

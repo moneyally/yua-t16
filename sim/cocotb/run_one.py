@@ -61,7 +61,7 @@ def main() -> int:
         parameters=params,
         build_args=["--timing", "-Wno-fatal", "--public-flat-rw",
                     "-Wno-WIDTHEXPAND", "-Wno-TIMESCALEMOD",
-                    "--unroll-count", "4096"],
+                    "--unroll-count", "16384"],
         build_dir=build,
         always=False,
     )

@@ -52,7 +52,7 @@ module gemm_core #(
   parameter int MAX_KT = 256,
   parameter int DMA_BEAT_BYTES = 16,
 
-  // DMA 읽기 데이터 폭. 128 또는 256.
+  // DMA 읽기 데이터 폭. 128, 256 또는 512.
   //
   // 한 K-step 은 INT8 16개 = 128비트다. 128 이면 비트 하나가 K-step
   // 하나를 나르고, 256 이면 두 개를 나른다. 전송 바이트 수는 같고
@@ -77,7 +77,7 @@ module gemm_core #(
   // spec/memory-bandwidth-analysis.md 참조.
   parameter int BANKS = 2,
 
-  // DMA 쓰기 데이터 폭. 128 또는 256.
+  // DMA 쓰기 데이터 폭. 128, 256 또는 512.
   //
   // 디스크립터당 출력은 타일 크기의 제곱(N²)이고 연산은 Kt 사이클이다.
   // N=16/Kt=64 에서는 쓰기 64 비트 vs 연산 64 사이클로 균형이 맞지만,
@@ -185,13 +185,13 @@ module gemm_core #(
   localparam int SADDR_W     = BADDR_W + BANK_W;
 
   initial begin
-    if (RD_DATA_W != 128 && RD_DATA_W != 256)
-      $fatal(1, "gemm_core: RD_DATA_W must be 128 or 256 (got %0d)", RD_DATA_W);
+    if (RD_DATA_W != 128 && RD_DATA_W != 256 && RD_DATA_W != 512)
+      $fatal(1, "gemm_core: RD_DATA_W must be 128, 256 or 512 (got %0d)", RD_DATA_W);
     // 뱅크 인덱스를 주소 상위에 그냥 붙이므로 2의 거듭제곱이어야 한다.
     if (BANKS < 2 || (BANKS & (BANKS - 1)) != 0)
       $fatal(1, "gemm_core: BANKS must be a power of two >= 2 (got %0d)", BANKS);
-    if (WR_DATA_W != 128 && WR_DATA_W != 256)
-      $fatal(1, "gemm_core: WR_DATA_W must be 128 or 256 (got %0d)", WR_DATA_W);
+    if (WR_DATA_W != 128 && WR_DATA_W != 256 && WR_DATA_W != 512)
+      $fatal(1, "gemm_core: WR_DATA_W must be 128, 256 or 512 (got %0d)", WR_DATA_W);
     // K-step 하나(N 바이트)가 읽기 비트에 정수 개 들어가야 한다.
     if (KPW < 1 || KPW * KSTEP_W != RD_DATA_W)
       $fatal(1, "gemm_core: RD_DATA_W (%0d) must be a positive multiple of TILE_N*8 (%0d)",

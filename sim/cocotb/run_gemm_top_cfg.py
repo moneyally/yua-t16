@@ -16,7 +16,7 @@ TM = os.environ.get("TEST_MODULE", "test_weight_stationary")
 r.build(sources=deps("gemm_top"), hdl_toplevel="gemm_top",
         parameters={"RD_DATA_W": W, "BANKS": NB, "WR_DATA_W": WW, "TILE_N": TN},
         build_args=["--timing","-Wno-fatal","--public-flat-rw",
-                    "-Wno-WIDTHEXPAND","-Wno-TIMESCALEMOD","--unroll-count","4096"],
+                    "-Wno-WIDTHEXPAND","-Wno-TIMESCALEMOD","--unroll-count","16384"],
         build_dir=ROOT/"sim_build"/"build"/f"gemm_top_W{W}_B{NB}_WW{WW}_N{TN}", always=False)
 sys.path.insert(0, str(ROOT/"sim/cocotb"))
 res = ROOT/"sim_build"/"results"; res.mkdir(parents=True, exist_ok=True)

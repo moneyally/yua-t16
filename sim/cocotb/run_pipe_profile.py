@@ -13,7 +13,7 @@ NB = int(os.environ.get("BANKS", "2"))
 r.build(sources=deps("gemm_core"), hdl_toplevel="gemm_core",
         parameters={"RD_DATA_W": W, "BANKS": NB},
         build_args=["--timing","-Wno-fatal","--public-flat-rw",
-                    "-Wno-WIDTHEXPAND","-Wno-TIMESCALEMOD","--unroll-count","4096"],
+                    "-Wno-WIDTHEXPAND","-Wno-TIMESCALEMOD","--unroll-count","16384"],
         build_dir=ROOT/"sim_build"/"build"/f"gemm_core_W{W}_B{NB}", always=False)
 sys.path.insert(0, str(ROOT/"sim/cocotb"))
 res = ROOT/"sim_build"/"results"; res.mkdir(parents=True, exist_ok=True)
