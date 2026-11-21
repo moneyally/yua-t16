@@ -13,6 +13,7 @@ from cocotb.triggers import RisingEdge, Timer
 from dma_stub import SimpleMem, start_dma
 
 RD_BEAT = int(os.environ.get("RD_BEAT_BYTES", "16"))
+WGT_KEEP = os.environ.get("WGT_KEEP", "0") == "1"
 
 LSTATE = ["L_IDLE", "L_ACT_REQ", "L_ACT_RECV", "L_WGT_REQ", "L_WGT_RECV"]
 CSTATE = ["C_IDLE", "C_CLR", "C_COMPUTE", "C_POST", "C_LATCH"]
@@ -30,6 +31,7 @@ async def boot(dut):
     dut.wgt_addr.value = 0
     dut.out_addr.value = 0
     dut.Kt.value = 0
+    dut.wgt_keep.value = 0
     dut.rd_req_ready.value = 1
     dut.wr_req_ready.value = 1
     dut.rd_data_valid.value = 0
@@ -74,6 +76,8 @@ async def test_pipeline_occupancy(dut):
         dut.wgt_addr.value = wgt
         dut.out_addr.value = out + 0x1000 * issued
         dut.Kt.value = Kt
+        # weight-stationary: 첫 디스크립터만 가중치를 적재한다.
+        dut.wgt_keep.value = 1 if (WGT_KEEP and issued > 0) else 0
         dut.cmd_valid.value = 1 if want else 0
 
         await Timer(1, unit="ns")
@@ -103,6 +107,9 @@ async def test_pipeline_occupancy(dut):
     # 앞뒤 2개는 파이프라인 채움/배출이라 버린다.
     steady = gaps[2:-2] if len(gaps) > 6 else gaps
     dut._log.info("")
+    dut._log.info(f"weight-stationary={'ON' if WGT_KEEP else 'off'}  "
+                  f"가중치 적재 {int(dut.perf_wgt_load.value)}회 / "
+                  f"재사용 {int(dut.perf_wgt_reuse.value)}회")
     dut._log.info(f"Kt={Kt}, {n_ops} ops, 전체 {total} 사이클 "
                   f"({total/n_ops:.1f}/op 평균, 채움/배출 포함)")
     dut._log.info(f"  완료 간격: {gaps}")

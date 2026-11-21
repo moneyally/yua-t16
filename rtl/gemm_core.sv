@@ -27,6 +27,26 @@
 //   연산  1 + 64 + 1 + 1  = 67
 //   쓰기  1 + 64 + 1      = 66
 // 주기는 67 이고, 직렬일 때의 199 와 비교된다.
+//
+// ── Weight-stationary ────────────────────────────────────────────
+//
+// 디스크립터마다 ACT 와 WGT 를 둘 다 읽으면 DRAM 트래픽의 절반이
+// 가중치 재읽기다. LLM 추론에서 한 레이어의 가중치는 그 레이어를 지나는
+// 모든 활성값 타일에 대해 똑같다 — 한 번 읽으면 된다.
+//
+// `wgt_keep` 이 서면 로드 FSM 이 WGT 단계를 건너뛰고 SRAM 에 남아 있는
+// 가중치를 그대로 쓴다. 가중치 타일 하나를 N 개 디스크립터가 재사용하면
+// 읽기 트래픽이 (N+1)/(2N) 로 줄고, N 이 크면 **절반**이 된다.
+//
+// 가중치 SRAM 도 2 뱅크지만 **포인터가 실제 적재 때만 전진한다.**
+// 건너뛴 디스크립터는 직전에 적재된 뱅크를 가리킨다. 활성값 뱅크가
+// 2개라 로드 FSM 은 연산 FSM 보다 최대 한 디스크립터 앞설 수 있고,
+// 그 조건에서 "적재 중인 가중치 뱅크 != 연산 중인 가중치 뱅크" 가
+// 항상 성립한다 (아래 증명). 그래서 드레인이 필요 없다 — wgt_keep=0
+// 경로도 완전히 파이프라인된 채로 남는다.
+//
+// Eyeriss (Chen/Emer/Sze, ISCA 2016) 의 weight-stationary 가 같은
+// 원리다. 그 논문은 AlexNet DRAM 접근을 2,896M → 61M 으로 줄였다.
 // spec/memory-bandwidth-analysis.md 참조.
 module gemm_core #(
   parameter int MAX_KT = 256,
@@ -66,8 +86,14 @@ module gemm_core #(
   input  logic [63:0] wgt_addr,
   input  logic [63:0] out_addr,
   input  logic [31:0] Kt,
+  // 1 이면 WGT 페치를 건너뛰고 SRAM 에 상주한 가중치를 쓴다.
+  // 가중치를 한 번도 적재하지 않았으면 무시된다 (아래 wgt_valid_r).
+  input  logic        wgt_keep,
 
   output logic        done,
+  // 상주 가중치를 실제로 쓴 디스크립터 수 / 적재 횟수 (호스트 계측용)
+  output logic [31:0] perf_wgt_reuse,
+  output logic [31:0] perf_wgt_load,
 
   // DMA Read
   output logic         rd_req_valid,
@@ -161,7 +187,8 @@ module gemm_core #(
   cstate_t cst, cst_n;
   wstate_t wst, wst_n;
 
-  logic ld_mark;     // 로드 완료: 뱅크를 연산 FSM 에 넘긴다 (1 사이클)
+  logic ld_mark;        // 로드 완료: 뱅크를 연산 FSM 에 넘긴다 (1 사이클)
+  logic wgt_load_done;  // 가중치 수신의 마지막 비트 (1 사이클)
   logic cm_free;     // 연산 완료: 뱅크를 로드 FSM 에 돌려준다 (1 사이클)
   logic wr_start;    // 쓰기 FSM 기동 (1 사이클)
 
@@ -186,9 +213,74 @@ module gemm_core #(
   logic [63:0] act_base_r, wgt_base_r;
   logic [15:0] rd_len_r;
 
+  // ── Weight-stationary 상태 ──────────────────────────────────────
+  // 가중치를 한 번이라도 적재했는가. 적재 전에는 wgt_keep 을 무시해야
+  // 한다 — 그러지 않으면 0 으로 채워진 SRAM 으로 계산한다.
+  logic wgt_valid_r;
+  // 이 디스크립터가 실제로 가중치를 건너뛰는가.
+  wire  wgt_skip = wgt_keep & wgt_valid_r;
+  // ── 가중치 뱅크 포인터 ──────────────────────────────────────────
+  //
+  //   wld_bank      로드 FSM 이 적재할 가중치 뱅크
+  //   wres_bank     가장 최근에 적재가 끝난 뱅크 (= 상주 가중치)
+  //   wgt_bank_of[] 대기 중인 각 디스크립터가 읽어야 할 가중치 뱅크
+  //
+  // 안전성: 활성값 뱅크가 2개이므로 로드 FSM 은 연산 FSM 보다 최대
+  // 한 디스크립터 앞선다. 디스크립터 N 을 연산하는 동안 로드가 N+1 을
+  // 적재한다고 하자.
+  //   - N 이 적재했다면 wgt_bank_of[N]=w, 그 적재가 끝나며 wld=~w 이다.
+  //   - N 이 건너뛰었다면 wgt_bank_of[N]=wres=w 이고 wld 는 그대로 ~w 다.
+  // 두 경우 모두 N+1 이 적재할 뱅크(~w)가 N 이 읽는 뱅크(w)와 다르다. ∎
+  logic [BANK_W-1:0] wld_bank, wres_bank;
+  logic [BANK_W-1:0] wgt_bank_of [0:BANKS-1];
+  wire  [BANK_W-1:0] wgt_bank_cm = wgt_bank_of[cm_bank];
+
   // 로드 FSM 은 자기 뱅크가 비어 있을 때만 명령을 받는다.
+  // 가중치 교체는 드레인을 요구하지 않는다 (위 증명).
   assign cmd_ready = (lst == L_IDLE) && !bank_full[ld_bank];
   wire   cmd_accept = cmd_valid & cmd_ready;
+
+  // 이 디스크립터가 가중치를 건너뛰는지 래치한다 (로드 FSM 이 쓴다).
+  logic wgt_skip_r;
+
+  // 호스트 계측
+  logic [31:0] wgt_reuse_r, wgt_load_r;
+  assign perf_wgt_reuse = wgt_reuse_r;
+  assign perf_wgt_load  = wgt_load_r;
+
+  integer wi;
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      wgt_valid_r <= 1'b0;
+      wgt_skip_r  <= 1'b0;
+      wgt_reuse_r <= 32'd0;
+      wgt_load_r  <= 32'd0;
+      wld_bank    <= '0;
+      wres_bank   <= '0;
+      for (wi = 0; wi < BANKS; wi = wi + 1)
+        wgt_bank_of[wi] <= '0;
+    end else if (cmd_accept) begin
+      wgt_skip_r <= wgt_skip;
+      if (wgt_skip) begin
+        // 상주 가중치를 그대로 쓴다. 포인터는 움직이지 않는다.
+        wgt_bank_of[ld_bank] <= wres_bank;
+        wgt_reuse_r          <= wgt_reuse_r + 1;
+      end else begin
+        // 이 디스크립터가 wld_bank 에 적재한다. 포인터는 여기서 올리지
+        // 않는다 — 올리면 로드 FSM 이 다음 뱅크에 써 버린다.
+        // wgt_valid_r 은 지금 세워도 된다. 이것을 보고 건너뛸 수 있는
+        // 디스크립터는 lst==L_IDLE 을 기다리므로 이 적재가 끝난 뒤다.
+        wgt_bank_of[ld_bank] <= wld_bank;
+        wgt_valid_r          <= 1'b1;
+        wgt_load_r           <= wgt_load_r + 1;
+      end
+    end
+    // 가중치 적재가 실제로 끝난 시점에 포인터를 전진시킨다.
+    if (wgt_load_done) begin
+      wres_bank <= wld_bank;
+      wld_bank  <= wld_bank + 1'b1;
+    end
+  end
 
   integer bi;
   always_ff @(posedge clk or negedge rst_n) begin
@@ -268,8 +360,10 @@ module gemm_core #(
   // 피연산자 SRAM (1W1R, 2 뱅크)
   // ----------------------------
   logic act_we, wgt_we, act_re, wgt_re;
-  logic [SADDR_W-1:0] act_waddr, wgt_waddr;
-  logic [SADDR_W-1:0] act_raddr, wgt_raddr;
+  logic [SADDR_W-1:0] act_waddr;
+  logic [SADDR_W-1:0] act_raddr;
+  logic [SADDR_W-1:0] wgt_waddr;
+  logic [SADDR_W-1:0] wgt_raddr;
   logic [RD_DATA_W-1:0] act_word, wgt_word;   // SRAM 출력 (워드 전체)
   logic [127:0] act_rdata, wgt_rdata;         // 선택된 K-step 하나
 
@@ -290,7 +384,7 @@ module gemm_core #(
   // 수신 비트 = 뱅크 내 워드 인덱스. 상위에 뱅크 비트를 붙인다.
   logic [BADDR_W-1:0] load_idx;
   assign act_waddr = {ld_bank, load_idx};
-  assign wgt_waddr = {ld_bank, load_idx};
+  assign wgt_waddr = {wld_bank, load_idx};
 
   // ✅ hold read address at "last issued" k to avoid reading past Kt
   logic [ADDR_W-1:0] rd_k_r;
@@ -307,13 +401,13 @@ module gemm_core #(
   generate
     if (KPW == 1) begin : G_W128
       assign act_raddr = {cm_bank, rd_k_mux[BADDR_W-1:0]};
-      assign wgt_raddr = {cm_bank, rd_k_mux[BADDR_W-1:0]};
+      assign wgt_raddr = {wgt_bank_cm, rd_k_mux[BADDR_W-1:0]};
       assign rd_half   = '0;
       assign act_rdata = act_word;
       assign wgt_rdata = wgt_word;
     end else begin : G_WIDE
       assign act_raddr = {cm_bank, rd_k_mux[KPW_W +: BADDR_W]};
-      assign wgt_raddr = {cm_bank, rd_k_mux[KPW_W +: BADDR_W]};
+      assign wgt_raddr = {wgt_bank_cm, rd_k_mux[KPW_W +: BADDR_W]};
       assign rd_half   = rd_k_mux[KPW_W-1:0];
       assign act_rdata = act_word[rd_half_q*128 +: 128];
       assign wgt_rdata = wgt_word[rd_half_q*128 +: 128];
@@ -552,9 +646,10 @@ end
     rd_req_addr      = 64'd0;
     rd_req_len_bytes = rd_len_r;
 
-    act_we  = 1'b0;
-    wgt_we  = 1'b0;
-    ld_mark = 1'b0;
+    act_we        = 1'b0;
+    wgt_we        = 1'b0;
+    ld_mark       = 1'b0;
+    wgt_load_done = 1'b0;
 
     case (lst)
       L_IDLE: if (cmd_accept) lst_n = L_ACT_REQ;
@@ -568,8 +663,15 @@ end
       L_ACT_RECV: begin
         if (rd_data_valid && rd_data_ready) act_we = 1'b1;
         // ✅ "진짜 마지막 beat" 기준으로 수신 완료 확정
-        if (rd_data_valid && rd_data_ready && rd_data_last)
-          lst_n = L_WGT_REQ;
+        if (rd_data_valid && rd_data_ready && rd_data_last) begin
+          if (wgt_skip_r) begin
+            // 가중치는 SRAM 에 상주한다. 읽을 것이 없으니 바로 넘긴다.
+            ld_mark = 1'b1;
+            lst_n   = L_IDLE;
+          end else begin
+            lst_n = L_WGT_REQ;
+          end
+        end
       end
 
       L_WGT_REQ: begin
@@ -581,6 +683,7 @@ end
       L_WGT_RECV: begin
         if (rd_data_valid && rd_data_ready) wgt_we = 1'b1;
         if (rd_data_valid && rd_data_ready && rd_data_last) begin
+          wgt_load_done = 1'b1;
           // 마지막 워드는 이 에지에 SRAM 에 들어가고 bank_full 도 같은
           // 에지에 선다. 연산 FSM 은 다음 사이클에야 그것을 보므로
           // 첫 읽기는 그 뒤가 된다. 해저드 없음.

@@ -33,6 +33,7 @@ OVERRIDES: dict[str, str] = {
     "test_gemm_utilization":     "gemm_top",
     "test_gemm_core_throughput": "gemm_core",
     "test_pipe_profile":         "gemm_core",
+    "test_weight_stationary":    "gemm_top",
     "test_mxu128_kstep":         "mxu_bf16_128x128",
     "test_mac_array":            "mac_array",
     "test_gemm_int4":            "gemm_int4",

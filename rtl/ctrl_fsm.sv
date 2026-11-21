@@ -34,6 +34,9 @@ module ctrl_fsm #(
   output logic [63:0] wgt_addr,
   output logic [63:0] out_addr,
   output logic [31:0] Kt,
+  // 디스크립터 바이트 1 (flags) bit0: 가중치 재적재 생략.
+  // 바이트 0 은 opcode, 2~15 는 예약, 16~43 은 주소/Kt, 63 은 CRC 다.
+  output logic        wgt_keep,
 
   input  logic        core_done,
   output logic        busy,
@@ -55,6 +58,7 @@ module ctrl_fsm #(
   logic [7:0]  desc_type_r;
   logic [63:0] act_addr_r, wgt_addr_r, out_addr_r;
   logic [31:0] Kt_r;
+  logic [7:0]  flags_r;
 
   // 코어에 떠 있는 GEMM 명령 수. busy 판정에 쓴다.
   logic [1:0] outstanding;
@@ -96,14 +100,18 @@ module ctrl_fsm #(
       wgt_addr_r  <= 64'd0;
       out_addr_r  <= 64'd0;
       Kt_r        <= 32'd0;
+      flags_r     <= 8'd0;
     end else if (state == ST_DECODE) begin
       desc_type_r <= latched[0];
+      flags_r     <= latched[1];
       act_addr_r  <= u64_le(16);
       wgt_addr_r  <= u64_le(24);
       out_addr_r  <= u64_le(32);
       Kt_r        <= u32_le(40);
     end
   end
+
+  localparam int FLAG_WGT_KEEP = 0;
 
   wire issue      = (state == ST_DISPATCH) && cmd_ready;
   wire local_done = (state == ST_DONE);
@@ -146,6 +154,7 @@ module ctrl_fsm #(
     wgt_addr = wgt_addr_r;
     out_addr = out_addr_r;
     Kt       = Kt_r;
+    wgt_keep = flags_r[FLAG_WGT_KEEP];
 
     case (state)
       ST_IDLE: begin
