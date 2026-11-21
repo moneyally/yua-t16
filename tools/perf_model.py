@@ -43,12 +43,27 @@ class Config:
     rd_bits: int          # DMA 읽기 폭
     wr_bits: int          # DMA 쓰기 폭
     kt: int               # 측정에 쓴 K-step 수
-    cycles_per_op: int    # MEASURED 정상상태 디스크립터 간격
+    cycles_per_op: float  # MEASURED 정상상태 디스크립터 간격
     weight_stationary: bool
+    cores: int = 1        # 텐서 병렬 코어 수
 
     @property
     def macs(self) -> int:
-        return self.tile_n ** 2
+        return self.cores * self.tile_n ** 2
+
+    @property
+    def act_bytes_per_desc(self) -> int:
+        """디스크립터당 활성값 바이트. 브로드캐스트라 코어 수와 무관하다."""
+        return self.kt * self.tile_n
+
+    @property
+    def intensity(self) -> float:
+        """산술 강도 (MAC / 활성값바이트). 코어 C 개의 N×N 이면 C·N 이다.
+
+        같은 MAC 수의 단일 타일은 한 변이 N√C 이라 강도가 N√C 다.
+        즉 클러스터가 √C 배 유리하다 — 브로드캐스트 덕이다.
+        """
+        return self.macs_per_desc / self.act_bytes_per_desc
 
     @property
     def macs_per_desc(self) -> int:
@@ -74,10 +89,22 @@ CONFIGS = [
     Config("N=16 256b, WS on",  16, 256, 256, 32,  38, True),
     Config("N=32 256b, WS on",  32, 256, 256, 128, 134, True),
     Config("N=64 512b, WS on",  64, 512, 512, 256, 262, True),
+    # 텐서 병렬 클러스터 (rtl/gemm_cluster.sv). 활성값을 브로드캐스트하므로
+    # 읽기 대역폭이 코어 수와 무관하다.
+    #   TILE_N=32 RD_DATA_W=256 WR_DATA_W=<폭> CORES=<n> \
+    #     python3.13 sim/cocotb/run_cluster.py
+    Config("2코어 N=32 wr256",  32, 256, 256, 256, 262,   True, cores=2),
+    Config("4코어 N=32 wr256",  32, 256, 256, 256, 588.5, True, cores=4),
+    Config("4코어 N=32 wr512",  32, 256, 512, 256, 262,   True, cores=4),
 ]
 
-BEST = CONFIGS[-1]               # N=64 — ASIC 급
-FPGA_BEST = CONFIGS[-2]          # N=32 — 단일 VC1902 에 들어가는 최대
+# 최고 측정 구성과 FPGA 설계점.
+# VC1902 는 DSP58 1,968 개다. 4코어×1,024 = 4,096 과 단일 N=64 = 4,096 은
+# 둘 다 2.1배 초과이고, 2코어×1,024 = 2,048 도 넘는다. 따라서 단일
+# VC1902 에 들어가는 최대는 N=32 단일 코어(1,024)다.
+BEST = next(c for c in CONFIGS if c.name == "4코어 N=32 wr512")
+FPGA_BEST = next(c for c in CONFIGS if c.name == "N=32 256b, WS on")
+
 
 # MEASURED — Yosys, `abc -g simple` 일반 셀 기준.
 #   yosys -p "read_verilog -sv rtl/mac_pe.sv; hierarchy -top mac_pe;
@@ -200,13 +227,13 @@ def report() -> dict:
 
     # ── 1. 측정된 구성 ────────────────────────────────────────────
     print("\n[MEASURED] 정상상태 처리량 (cocotb + Verilator)")
-    print(f"  {'구성':<22}{'Kt':>5}{'사이클/op':>11}{'MAC/사이클':>12}"
-          f"{'OPS/사이클':>12}{'가동률':>9}")
-    print("  " + "-" * 70)
+    print(f"  {'구성':<20}{'코어':>4}{'MAC':>7}{'Kt':>5}{'사이클/op':>10}"
+          f"{'MAC/사이클':>11}{'가동률':>8}{'강도':>9}")
+    print("  " + "-" * 76)
     for c in CONFIGS:
-        print(f"  {c.name:<22}{c.kt:>5}{c.cycles_per_op:>11}"
-              f"{c.macs_per_cycle:>12.0f}{c.ops_per_cycle:>12.0f}"
-              f"{c.utilisation*100:>8.1f}%")
+        print(f"  {c.name:<20}{c.cores:>4}{c.macs:>7,}{c.kt:>5}"
+              f"{c.cycles_per_op:>10.1f}{c.macs_per_cycle:>11.0f}"
+              f"{c.utilisation*100:>7.1f}%{c.intensity:>7.0f} M/B")
         out["measured"][c.name] = {
             "kt": c.kt, "cycles_per_op": c.cycles_per_op,
             "macs_per_cycle": round(c.macs_per_cycle, 1),
@@ -220,15 +247,28 @@ def report() -> dict:
           f"{MAC_PE_LOGIC_DEPTH} (2입력 게이트)")
     print("[DERIVED ] MAC 배열 셀 (측정 PE × 배열 크기) 과 FPGA 적합성:")
     dev0 = DEVICES["vck190"]
-    for c in CONFIGS:
-        if c is not CONFIGS[0] and c.tile_n == CONFIGS[0].tile_n:
+    seen: set[int] = set()
+    for c in sorted(CONFIGS, key=lambda c: c.macs):
+        if c.macs in seen:
             continue
-        cells = array_cells(c)
+        seen.add(c.macs)
         fits = "들어감" if c.macs <= dev0.dsp else \
                f"DSP58 {c.macs/dev0.dsp:.1f}배 초과"
-        print(f"           N={c.tile_n:<3} MAC {c.macs:>5,}  "
-              f"{cells:>10,} 셀   VC1902: {fits}")
+        shape = f"{c.cores}×{c.tile_n}²" if c.cores > 1 else f"{c.tile_n}²"
+        print(f"           {shape:<8} MAC {c.macs:>5,}  "
+              f"{array_cells(c):>10,} 셀   VC1902: {fits}")
     print("[MEASURED] INT4 가중치: 가중치 비트 정확히 절반, 결과 동일")
+
+    print("\n[DERIVED ] 같은 MAC 수에서 클러스터 vs 단일 타일")
+    single = next(c for c in CONFIGS if c.name == "N=64 512b, WS on")
+    clus   = next(c for c in CONFIGS if c.name == "4코어 N=32 wr512")
+    for c in (single, clus):
+        print(f"           {c.name:<20} MAC {c.macs_per_desc:>9,}  "
+              f"활성값 {c.act_bytes_per_desc:>6,}B  "
+              f"강도 {c.intensity:>4.0f} MAC/B")
+    print(f"           → 클러스터가 읽기 대역폭을 "
+          f"{single.intensity/clus.intensity:.2f}배만 쓴다 "
+          f"(= 1/√CORES). 브로드캐스트 덕이다.")
 
     # ── 2. 주파수 가정 ───────────────────────────────────────────
     print(f"\n[ASSUMED ] 동작 주파수 — **이 저장소에 측정값이 없다**")

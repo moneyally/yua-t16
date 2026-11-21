@@ -1,213 +1,265 @@
-# ORBIT-G2 — Custom LLM Inference Accelerator
+# ORBIT — INT8/INT4 GEMM 추론 가속기
 
-> Custom SystemVerilog RTL + Python host stack for a dedicated LLM inference chip.  
-> Full software-hardware closed loop verified: **237 tests** across RTL simulation, cocotb co-simulation, and Python host stack.
+커스텀 SystemVerilog RTL + Python 호스트 스택. LLM 추론용 GEMM 가속기다.
 
----
-
-## What is this?
-
-ORBIT-G2 is an open-source hardware accelerator for LLM inference. Built from scratch — RTL, host software, FPGA bitstream, everything.
-
-- **23 RTL modules** in SystemVerilog (control plane + compute pipeline)
-- **Python host stack** with HAL, CLI, descriptor packer, trace decoder, scheduler
-- **Co-simulation**: Python host stack drives RTL via cocotb — GEMM end-to-end verified
-- **FPGA target**: VCK190 (Versal VC1902) PCIe Gen4 x8
-- **Bitstream generated**: Vivado 2025.2, synthesis + implementation + PDI complete
+**이 README 의 모든 성능 숫자는 시뮬레이션 측정값이고, 재현 명령이 같이
+적혀 있다.** 측정하지 않은 것은 "측정하지 않음" 으로 적었다 — 특히
+**동작 주파수는 측정값이 없다** (배치·배선 미실행).
 
 ---
 
-## Test Results
+## 지금 상태
 
-| Category | Tests | Status |
-|----------|-------|--------|
-| Python unit/integration | 208 | All pass |
-| RTL cocotb (module-level) | 24 | All pass |
-| Host-driven DUT (GEMM E2E) | 5 | All pass |
-| **Total** | **237** | **All pass** |
-
-### What the E2E test actually proves
-
-The `test_host_gemm_e2e` test runs this full path on real RTL:
-
-```
-Python host stack
-  → descriptor pack (CRC-8)
-  → register staging (16 MMIO writes)
-  → doorbell ring
-  → desc_queue push
-  → priority arbiter (Q3>Q0>Q1>Q2)
-  → desc_fsm_v2 (CRC check + opcode validation)
-  → gemm_top dispatch
-  → gemm_core (DMA read act + wgt → MAC compute → DMA write result)
-  → completion IRQ
-  → trace ring event
-  → host reads IRQ + trace + clears fault
-```
-
-All in one cocotb test. No mocks, no shortcuts — the Python host stack talks to the SystemVerilog DUT.
-
----
-
-## Architecture
-
-```
-Host Software (Python)
-  │
-  ├── OrbitDevice HAL
-  │     ├── connect / enqueue / poll / clear
-  │     └── Backend abstraction
-  │           ├── SimBackend (unit tests)
-  │           ├── CocotbBackend (RTL simulation)
-  │           └── MmapBackend (real hardware via PCIe BAR mmap)
-  │
-  ▼
-RTL (SystemVerilog)
-  │
-  ├── g2_protob_top ─────────── Proto-B top (PCIe + DMA + control)
-  │     ├── pcie_ep_versal ──── CPM PCIe Gen4 x8 adapter
-  │     ├── dma_bridge ──────── DMA submit/status state machine
-  │     └── g2_ctrl_top ─────── Proto-A control plane
-  │           ├── reg_top ───── 48 MMIO registers (REG_SPEC)
-  │           ├── desc_queue ── 4 descriptor queues + priority arbiter
-  │           ├── desc_fsm_v2 ─ CRC / timeout / opcode validation
-  │           ├── gemm_top ──── GEMM orchestrator
-  │           │     ├── ctrl_fsm
-  │           │     └── gemm_core (INT8 16×16 MAC array)
-  │           ├── oom_guard ─── 4-state memory pressure controller
-  │           ├── trace_ring ── 1K-entry debug event ring
-  │           ├── irq_ctrl ──── 12-source interrupt controller (W1C)
-  │           └── reset_seq ─── Reset sequencer (POR/SW/WDOG)
-  │
-  ▼
-FPGA (VCK190 / VC1902)
-  PCIe Gen4 x8 → BAR0 (1MB registers) + BAR4 (64KB DMA)
-```
-
----
-
-## Quick Start
-
-### Run tests (no hardware needed)
+| | |
+|---|---|
+| 검증 | cocotb **61/61** 테스트벤치, **228** 테스트, 실패 0 |
+| | pytest **275** 테스트, 실패 0 |
+| 최고 측정 처리량 | **8,004 INT8 OPS/사이클** (4코어 32×32 또는 단일 64×64, 가동률 97.7%) |
+| FPGA 설계점 | 32×32 타일 — 1,956 OPS/사이클, VC1902 DSP58 예산 내 |
+| 데이터 포맷 | 활성값 INT8, 가중치 INT8 또는 **INT4** |
+| 보드 | VCK190 (Versal VC1902), PCIe Gen4 x8 — **보드 기동 미실시** |
 
 ```bash
-pip install pytest
-cd yua-t16
-python -m pytest tests/ -v
-# 208 passed
-```
+# 전체 RTL 회귀 (verilator + cocotb 필요)
+python3 sim/cocotb/run_all.py && python3 sim/cocotb/summarize.py
 
-### Debug CLI
+# 호스트 스택 테스트
+python3 -m pytest tests/ -q
 
-```bash
-python -m tools.orbit_debug_protoa info
-python -m tools.orbit_debug_protoa queue-status
-python -m tools.orbit_debug_protoa tc-status
-python -m tools.orbit_debug_protoa irq
-python -m tools.orbit_debug_protoa trace-dump --count 16
-python -m tools.orbit_debug_protoa doorbell --queue 0 --opcode 0x01
-```
-
-### RTL co-simulation (needs verilator + cocotb)
-
-```bash
-pip install cocotb verilator
-# Host-driven GEMM E2E runs Python host stack against RTL DUT
-# See tb/tb_g2_ctrl_top_host_e2e.py
-```
-
-### Build FPGA bitstream (needs Vivado 2025.2)
-
-```bash
-cd fpga/vck190
-vivado -mode batch -source create_project.tcl
-# Configure CPM endpoint in Vivado GUI, then synthesize
+# 성능 모델 (측정값/가정값 구분 보고)
+python3 tools/perf_model.py
 ```
 
 ---
 
-## Project Structure
+## 설계의 요점 — 대역폭을 설계로 피한다
+
+GEMM 가속기의 성능은 MAC 개수가 아니라 **MAC 을 먹일 수 있는지**가 정한다.
+이 저장소의 작업은 거의 전부 그 문제다.
+
+### 1. 3단 파이프라인 — 페치·연산·쓰기를 겹친다
+
+로드(`lst`) / 연산(`cst`) / 쓰기(`wst`) 세 FSM 이 서로 다른 자원을 쓰므로
+서로 다른 디스크립터를 동시에 처리한다. 묶이는 지점은 피연산자 SRAM
+뱅크(이중 버퍼)와 `acc_out_lat`(단일 버퍼) 둘뿐이다.
 
 ```
-yua-t16/
-├── rtl/                       # 23 SystemVerilog modules
-│   ├── g2_protob_top.sv       #   Proto-B top (PCIe + control)
-│   ├── g2_ctrl_top.sv         #   Proto-A control plane
-│   ├── pcie_ep_versal.sv      #   PCIe endpoint (CPM adapter)
-│   ├── dma_bridge.sv          #   DMA state machine
-│   ├── reg_top.sv             #   48-register MMIO bank
-│   ├── desc_queue.sv          #   4-queue ring buffer
-│   ├── desc_fsm_v2.sv         #   Descriptor validator
-│   ├── gemm_top.sv            #   GEMM orchestrator
-│   ├── gemm_core.sv           #   INT8 16x16 MAC + DMA
-│   ├── oom_guard.sv           #   Memory pressure controller
-│   ├── trace_ring.sv          #   Debug trace ring
-│   ├── irq_ctrl.sv            #   Interrupt controller
-│   ├── reset_seq.sv           #   Reset sequencer
-│   ├── cdc_fifo.sv            #   Async FIFO
-│   └── ...                    #   mac_array, mac_pe, kvc_core, etc.
-│
-├── tb/                        # 9 cocotb testbenches, 29 tests
-│   ├── tb_g2_ctrl_top_host_e2e.py  # Host-driven GEMM E2E
-│   ├── dma_responder.py            # DMA test memory model
-│   └── ...
-│
-├── tools/                     # Python host stack (14 modules)
-│   ├── orbit_device.py        #   Device HAL
-│   ├── orbit_mmio_map.py      #   Register map SSOT
-│   ├── orbit_desc.py          #   Descriptor packer + CRC
-│   ├── orbit_scheduler.py     #   Op scheduler
-│   ├── orbit_debug_protoa.py  #   Debug CLI
-│   └── ...
-│
-├── tests/                     # 16 test files, 208 tests
-├── fpga/vck190/               # Vivado project + Tcl scripts
-├── scripts/                   # Board smoke test
-└── docs/                      # 15 design documents
+          원본 (완전 직렬)   268 사이클/op   가동률 25.4%
+          3단 파이프라인      70 사이클/op   가동률 91.4%
+```
+
+### 2. Weight-stationary — 가중치를 다시 읽지 않는다
+
+LLM 한 레이어의 가중치는 그 레이어를 지나는 모든 활성값 타일에 대해 같다.
+디스크립터 flags bit0 (`FLAG_WGT_KEEP`) 이 서면 가중치 페치를 건너뛰고
+SRAM 에 상주한 것을 쓴다.
+
+```
+          읽기 비트 (Kt=16):  [32, 16, 16, 16]   첫 번째만 적재
+          128비트 버스에서    131 → 70 사이클/op  (가동률 48.9% → 91.4%)
+```
+
+**버스를 넓히지 않고** 256비트 확장과 같은 결과를 얻는다. 데이터플로가
+배선보다 싸다. (Eyeriss, ISCA 2016 의 weight-stationary 와 같은 원리 —
+그 논문은 AlexNet DRAM 접근을 2,896M → 61M 으로 줄였다.)
+
+### 3. INT4 가중치 — 배치 1 에서도 두 배
+
+단일 스트림 디코드는 토큰마다 가중치 전체를 한 번 읽는 데 묶인다.
+가중치를 INT4 로 두면 그 바이트가 절반이 되고 토큰 속도가 두 배가 된다.
+MAC 배열은 그대로 8비트를 받고, 니블을 부호확장해 넣는다.
+
+```
+          Kt=64 가중치 비트:  INT8 64 → INT4 32   결과는 비트 단위로 동일
+```
+
+### 4. 타일 확장 — 산술 강도가 N 에 비례한다
+
+N×N 외적 누산에서 MAC 은 N², 피연산자 바이트는 N 이다. 타일을 2배 하면
+연산 4배, 피연산자 2배다.
+
+| TILE_N | MAC | RD/WR | Kt | 사이클/op | MAC/사이클 | 가동률 |
+|---:|---:|---|---:|---:|---:|---:|
+| 16 | 256 | 128/128 | 64 | 70 | 234 | 91.4% |
+| 32 | 1,024 | 256/256 | 128 | 134 | 978 | 95.5% |
+| 64 | 4,096 | 512/512 | 256 | 262 | **4,002** | **97.7%** |
+
+### 5. 텐서 병렬 클러스터 — 활성값을 한 번만 읽는다
+
+`gemm_cluster` 는 가중치를 열 방향으로 쪼개 코어마다 다른 조각을 상주시키고
+**같은 활성값을 브로드캐스트**한다. 연산은 코어 수에 비례하는데 활성값
+트래픽은 그대로다.
+
+| CORES | RD/WR | 사이클/op | MAC/사이클 | 가동률 | 묶는 쪽 |
+|---:|---|---:|---:|---:|---|
+| 1 | 256/256 | 134 | 978 | 95.5% | 연산 |
+| 2 | 256/256 | 262 | **2,001** | 97.7% | 연산 |
+| 4 | 256/256 | 588.5 | 1,782 | 43.5% | **쓰기** |
+| 4 | 256/**512** | 262 | **4,002** | 97.7% | 연산 |
+
+코어 수에 **선형**이다. 상주 가중치가 들어가면 디스크립터당 읽기 요청이
+**1개(활성값)** 로 떨어지고 코어 수와 무관해진다.
+
+쓰기 폭은 따라가야 한다 — 출력량은 코어 수에 비례하므로 균형 조건이
+`Kt = CORES · N² · 4 / (WR_DATA_W/8)` 다.
+
+### 그리고 이것이 "코어 vs 타일" 의 답이다
+
+같은 MAC 수, 같은 처리량(4,002 MAC/사이클)인 두 구성:
+
+| 구성 | 활성값 바이트 | 산술 강도 |
+|---|---:|---:|
+| 단일 64×64 | 16,384 | 64 MAC/B |
+| **4코어 32×32** | **8,192** | **128 MAC/B** |
+
+코어 C 개의 N×N 클러스터는 강도가 `C·N` 이고, 같은 MAC 수의 단일 타일은
+`N√C` 다. **클러스터가 √C 배 유리하다.** 대역폭이 묶는 쪽이면 타일을
+키우지 말고 코어를 늘려야 한다.
+
+---
+
+## 성능 — 정직한 숫자
+
+`tools/perf_model.py` 가 출처 태그(MEASURED / SOURCED / ASSUMED / DERIVED)를
+붙여 보고한다. `tests/test_perf_model.py` 가 모델이 측정값에서 벗어나지
+않도록 묶는다.
+
+### H200 과의 격차는 항목마다 다르다
+
+| 항목 | 이 설계 (32×32, 300MHz **가정**) | H200 | 격차 |
+|---|---:|---:|---:|
+| INT8 피크 | 0.59 TOPS | 1,979 TOPS | 3,372× |
+| 메모리 대역폭 | 25.6 GB/s | 4,800 GB/s | **188×** |
+| 메모리 용량 | 16 GB | 141 GB | 8.8× |
+
+### LLM 디코드에서는 연산 격차가 나타나지 않는다
+
+디코드는 토큰마다 가중치 전체를 읽는다. **양쪽 다 메모리에 묶이므로**
+실효 격차는 대역폭비다.
+
+```
+7B, 배치 1        가중치    토큰/s   묶는 쪽
+이 설계 INT8      7.0 GB     3.7    메모리
+이 설계 INT4      3.5 GB     7.3    메모리
+H200    INT4      3.5 GB  1371.4    메모리
+                          → 188×   (= 대역폭비, 연산비 3,372× 아님)
+```
+
+배치를 키우면 메모리 한계가 올라가다 연산에 부딪힌다. 7B INT4 / 32×32 /
+300MHz 가정에서 **배치 8 이 균형점**이고, 그 뒤로는 MAC 을 늘려야 한다.
+
+### 데이터센터급과의 진짜 거리는 실리콘 양이다
+
+Groq 와 Cerebras 는 HBM 대역폭을 키워서 이긴 게 아니라 **DRAM 을 임계
+경로에서 뺐다.** 대가는 용량이다.
+
+| 장치 | 온칩 SRAM | 7B INT4 를 전부 올리려면 |
+|---|---:|---:|
+| VCK190 | 20.5 MB | **171 개** |
+| Groq LPU | 230 MB | 15 개 |
+| Cerebras WSE-3 | 44 GB | 0.1 개 |
+
+**RTL 이 아니라 실리콘 양이 격차다.** 이 저장소의 RTL 은 가동률 97.7% 로
+자기 몫을 하고 있고, 남은 거리는 설계로 메울 수 없다.
+
+> Groq / Cerebras 대역폭은 벤더 주장이며 독립 벤치마크로 확인하지 못했다.
+
+---
+
+## 측정하지 않은 것
+
+정직하게 적는다. 이 네 가지는 이 저장소에 근거가 없다.
+
+1. **동작 주파수.** 배치·배선을 돌리지 않았다 (이 환경에 Vivado 없음).
+   위의 TOPS 는 전부 가정 주파수 기준이다. `mac_pe` 의 논리 단수 67 이
+   임계 경로이고, 실제 Vivado 는 곱셈·누산을 DSP58 하드 블록으로 뽑을
+   것이므로 일반 셀 단수에서 주파수를 추정할 수 없다.
+2. **실제 DRAM 지연.** DMA 스텁은 지연 0 으로 응답한다. 실제 메모리는 더
+   느리므로 모든 사이클 수가 **낙관적 상한**이다.
+3. **PCIe 디스크립터 비트 위치.** `pcie_ep_versal.sv` 의 CQ/CC 필드 배치를
+   PG343 과 대조하지 못했다. 보드 첫 기동 때 1순위 의심 지점이다.
+4. **비트스트림.** 이전 판 README 는 PDI 생성 완료를 적었으나 저장소에
+   산출물·리포트가 없고 이 환경에서 재현할 수 없었다. 검증되지 않은
+   것으로 둔다.
+
+---
+
+## 이 저장소에서 찾아 고친 조용한 버그
+
+네 개 다 **단일 트랜잭션만 테스트돼 있었다**는 공통점이 있다.
+
+| 모듈 | 버그 | 왜 안 드러났나 |
+|---|---|---|
+| `mxu_bf16_128x128` | FP32 비트를 정수로 더해 누산 | K=1 만 테스트 |
+| `trace_ring` | head 전진 조건이 한 칸 빠름 | 랩어라운드 전까지만 테스트 |
+| `gemm_core` | `mac_en` 이 피연산자보다 2사이클 늦음 | Kt=1 에서 우연히 맞음 |
+| `ctrl_fsm` / `g3_desc_fsm` | 핸드셰이크 **다음** 사이클에 디스크립터 래치 (AXI-Stream 규약 위반) | 디스크립터 하나만 보내면 안 드러남 |
+| `gemm_cluster` | `cmd_valid` 를 게이트하지 않아 먼저 준비된 코어가 같은 디스크립터를 중복 수락 | 코어 1개 또는 디스크립터 1개면 안 드러남 |
+
+`cdc_fifo` 는 `initial` 블록이 포트 목록 안에 있어 **한 번도 파싱되지
+않았다.** 테스트벤치는 36개 중 2개만 돌던 상태였다.
+
+---
+
+## 구조
+
+```
+rtl/
+  gemm_cluster.sv     텐서 병렬 클러스터 (활성값 브로드캐스트 + 중재)
+  gemm_top.sv         디스크립터 → 코어 오케스트레이션
+  ctrl_fsm.sv         디스크립터 디코드 / 발행 파이프라인
+  gemm_core.sv        3단 파이프라인 + 이중 버퍼 + WS + INT4
+  mac_array.sv        N×N INT8 외적 누산 (N 파라미터)
+  mac_pe.sv           8×8 곱 + 32비트 누산 (측정 817 셀, 논리 67단)
+  act_sram.sv         활성값 스테이징 (1W1R, 뱅크)
+  wgt_sram.sv         가중치 스테이징 (1W1R, 뱅크)
+  bf16_pkg.sv         BF16/FP32 산술 + 고정소수점 누산 (SSOT)
+  mxu_bf16_128x128.sv BF16 MXU (PAR×PAR 타일 격자)
+  pcie_ep_versal.sv   CPM PCIe 컴플리터 (비트 위치 미검증)
+  ...                 reg_top, desc_queue, oom_guard, trace_ring, irq_ctrl
+
+sim/cocotb/
+  run_all.py          전체 회귀 (의존성 그래프 + 구성 변형 자동)
+  summarize.py        결과 집계
+  dma_stub.py         DMA 메모리 모델 (읽기/쓰기 비트 폭 분리)
+  test_*.py           기능별 테스트
+
+tools/
+  perf_model.py       성능 모델 (출처 태그 포함)
+  orbit_*.py          호스트 스택 (HAL, 디스크립터, CLI, 스케줄러)
+
+spec/
+  memory-bandwidth-analysis.md   전 단계 측정 기록 (이 작업의 핵심 문서)
+  mxu-128x128-rewrite.md
+  pe-fixed-point-redesign.md
+  verification-infrastructure.md
 ```
 
 ---
 
-## Register Map
+## 주요 파라미터
 
-48 registers across 11 blocks. All addresses in [`tools/orbit_mmio_map.py`](tools/orbit_mmio_map.py).
+```systemverilog
+gemm_cluster #(
+  .TILE_N    (32),    // MAC 타일 한 변. 16 / 32 / 64
+  .RD_DATA_W (256),   // DMA 읽기 폭. TILE_N*8 의 배수여야 한다
+  .WR_DATA_W (256),   // DMA 쓰기 폭. TILE_N² 가 WR_DATA_W/32 의 배수
+  .BANKS     (2),     // 피연산자 뱅크 (2의 거듭제곱)
+  .CORES     (2)      // 텐서 병렬 코어 수
+)
+```
 
-| Block | Key Registers |
-|-------|--------------|
-| Global | G2_ID (`0x47320001`), VERSION, CAP0 |
-| Reset | BOOT_CAUSE, SW_RESET, WDOG_CTRL |
-| Queue | Q0-Q3 DOORBELL, STATUS, OVERFLOW (W1C) |
-| DMA | SUBMIT_LO/HI, CTRL, STATUS, ERR_CODE |
-| OOM | USAGE, RESERVED, STATE (NORMAL/PRESSURE/CRITICAL/EMERG) |
-| TC0 | RUNSTATE (IDLE/FETCH/RUN/FAULT), CTRL, FAULT_STATUS |
-| Perf | MXU_BUSY_CYCLES, TILE_COUNT, FREEZE |
-| IRQ | PENDING (W1C, set-wins), MASK, FORCE, CAUSE_LAST |
-| Trace | HEAD, TAIL, CTRL + 1K-entry read window |
+어긋난 조합은 합성 전에 `$fatal` 로 터진다 — 조용히 틀린 값을 내지 않는다.
 
----
+디스크립터 flags (바이트 1):
 
-## Status
-
-| Milestone | Status |
-|-----------|--------|
-| RTL skeleton (7 new modules) | Done |
-| Control plane integration | Done |
-| MMIO device contract (48 registers) | Done |
-| Python host stack + CLI | Done |
-| Host-driven RTL co-simulation | Done — GEMM E2E proven |
-| Proto-B PCIe/DMA contract | Done |
-| Linux MMIO open path | Done |
-| VCK190 Vivado project + CPM config | Done |
-| **Bitstream (PDI) generated** | **Done** — 0 errors |
-| Connect RTL to CPM Block Design | Next |
-| VCK190 board bring-up | Needs board |
+| 비트 | 이름 | 뜻 |
+|---:|---|---|
+| 0 | `FLAG_WGT_KEEP` | 가중치 재적재 생략 (상주 사용) |
+| 1 | `FLAG_WGT_INT4` | 가중치가 INT4 패킹 |
 
 ---
 
 ## License
 
 MIT
-
----
-
-*Built by YUA AI. Simulation-verified, bitstream-generated, awaiting silicon.*

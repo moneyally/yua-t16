@@ -24,6 +24,10 @@ MEASURED = {
     "N=16 256b, WS on":  (32,  38, 216, 84.2),
     "N=32 256b, WS on":  (128, 134, 978, 95.5),
     "N=64 512b, WS on":  (256, 262, 4002, 97.7),
+    # 텐서 병렬 클러스터 (run_cluster.py)
+    "2코어 N=32 wr256":  (256, 262, 2001, 97.7),
+    "4코어 N=32 wr256":  (256, 588.5, 1782, 43.5),
+    "4코어 N=32 wr512":  (256, 262, 4002, 97.7),
 }
 
 
@@ -53,7 +57,8 @@ def test_tile_scaling_is_quadratic_in_macs():
     같이 오르므로 비가 4배를 조금 넘는다.
     """
     by_n = {c.tile_n: c for c in pm.CONFIGS
-            if c.weight_stationary and c.rd_bits == c.tile_n * 8}
+            if c.weight_stationary and c.cores == 1
+            and c.rd_bits == c.tile_n * 8}
     assert set(by_n) == {16, 32, 64}, f"예상 밖 구성: {sorted(by_n)}"
     for lo, hi in ((16, 32), (32, 64)):
         assert by_n[hi].macs == 4 * by_n[lo].macs
@@ -65,12 +70,51 @@ def test_tile_scaling_is_quadratic_in_macs():
 
 
 def test_fpga_fit_boundary():
-    """N=32 는 VC1902 DSP58 예산에 들어가고 N=64 는 넘는다."""
+    """단일 N=32 는 VC1902 DSP58 예산에 들어가고 그보다 큰 것은 넘는다."""
     dsp = pm.DEVICES["vck190"].dsp
-    n32 = next(c for c in pm.CONFIGS if c.tile_n == 32)
-    n64 = next(c for c in pm.CONFIGS if c.tile_n == 64)
-    assert n32.macs <= dsp
-    assert n64.macs > dsp
+    assert pm.FPGA_BEST.macs <= dsp, "FPGA 설계점이 DSP 예산을 넘는다"
+    for c in pm.CONFIGS:
+        if c.macs > pm.FPGA_BEST.macs:
+            assert c.macs > dsp, \
+                f"{c.name} 이 FPGA_BEST 보다 큰데 예산에 들어간다"
+
+
+def test_cluster_beats_single_tile_on_intensity():
+    """같은 MAC 수에서 클러스터의 산술 강도가 √CORES 배 높다.
+
+    활성값을 브로드캐스트하므로 읽기 바이트가 코어 수와 무관하다.
+    이것이 "코어를 늘릴까 타일을 키울까" 의 답이다.
+    """
+    single = next(c for c in pm.CONFIGS if c.name == "N=64 512b, WS on")
+    clus = next(c for c in pm.CONFIGS if c.name == "4코어 N=32 wr512")
+    assert clus.macs == single.macs, "비교 대상의 MAC 수가 달라졌다"
+    assert clus.macs_per_cycle == pytest.approx(single.macs_per_cycle, rel=1e-3)
+    assert clus.intensity == pytest.approx(2 * single.intensity), \
+        f"강도 {clus.intensity} vs {single.intensity} — √4 = 2배여야 한다"
+    # 일반식: 코어 C 개의 N×N 은 강도 C·N
+    assert clus.intensity == pytest.approx(clus.cores * clus.tile_n)
+
+
+def test_cluster_scales_linearly_in_cores():
+    """코어 수에 선형. 쓰기 폭이 따라가야 성립한다."""
+    one = next(c for c in pm.CONFIGS if c.name == "N=32 256b, WS on")
+    two = next(c for c in pm.CONFIGS if c.name == "2코어 N=32 wr256")
+    four = next(c for c in pm.CONFIGS if c.name == "4코어 N=32 wr512")
+    assert two.macs_per_cycle / one.macs_per_cycle == pytest.approx(2.05, abs=0.05)
+    assert four.macs_per_cycle / two.macs_per_cycle == pytest.approx(2.0, abs=0.05)
+
+
+def test_narrow_write_channel_binds_four_cores():
+    """256비트 쓰기로는 4코어가 쓰기에 묶인다. 그 사실이 기록돼 있어야 한다."""
+    narrow = next(c for c in pm.CONFIGS if c.name == "4코어 N=32 wr256")
+    wide = next(c for c in pm.CONFIGS if c.name == "4코어 N=32 wr512")
+    assert narrow.utilisation < 0.5, "쓰기 병목이 사라졌다면 기록을 고쳐야 한다"
+    assert wide.utilisation > 0.95
+    # 균형 조건: Kt == CORES · N² · 4 / (WR_DATA_W/8)
+    need = narrow.cores * narrow.tile_n ** 2 * 4 // (narrow.wr_bits // 8)
+    assert need > narrow.kt, "256비트에서 균형 Kt 가 측정 Kt 를 넘어야 한다"
+    need_wide = wide.cores * wide.tile_n ** 2 * 4 // (wide.wr_bits // 8)
+    assert need_wide == wide.kt, "512비트에서 균형이 맞아야 한다"
 
 
 def test_int4_doubles_decode_rate():
