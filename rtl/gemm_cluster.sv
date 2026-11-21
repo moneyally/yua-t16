@@ -98,6 +98,7 @@ module gemm_cluster #(
   logic [63:0] act_addr_c, wgt_addr_c, out_addr_c;
   logic [31:0] Kt_c;
   logic        wgt_keep_c, wgt_int4_c;
+  logic        acc_keep_c, no_wb_c;
   logic        ctrl_busy, ctrl_done_pulse;
   logic        core_done_any;
 
@@ -111,6 +112,7 @@ module gemm_cluster #(
     .cmd_valid(cmd_valid_ctrl), .cmd_ready(cmd_ready_all),
     .act_addr(act_addr_c), .wgt_addr(wgt_addr_c), .out_addr(out_addr_c),
     .Kt(Kt_c), .wgt_keep(wgt_keep_c), .wgt_int4(wgt_int4_c),
+    .acc_keep(acc_keep_c), .no_wb(no_wb_c),
     .core_done(core_done_any),
     .busy(ctrl_busy), .done_pulse(ctrl_done_pulse)
   );
@@ -169,7 +171,7 @@ module gemm_cluster #(
       wire [63:0] my_out = out_addr_c + 64'(out_stride_r) * ci;
 
       gemm_core #(
-        .MAX_KT(MAX_KT), .DMA_BEAT_BYTES(RD_DATA_W/8),
+        .MAX_KT(MAX_KT),
         .RD_DATA_W(RD_DATA_W), .BANKS(BANKS),
         .WR_DATA_W(WR_DATA_W), .TILE_N(TILE_N)
       ) u_core (
@@ -177,6 +179,7 @@ module gemm_cluster #(
         .cmd_valid(cmd_valid_gated), .cmd_ready(c_cmd_ready[ci]),
         .act_addr(act_addr_c), .wgt_addr(my_wgt), .out_addr(my_out),
         .Kt(Kt_c), .wgt_keep(wgt_keep_c), .wgt_int4(wgt_int4_c),
+        .acc_keep(acc_keep_c), .no_wb(no_wb_c),
         .done(c_done[ci]),
 
         .rd_req_valid(c_rd_req_valid[ci]), .rd_req_ready(c_rd_req_ready[ci]),

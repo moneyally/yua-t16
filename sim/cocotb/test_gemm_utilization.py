@@ -31,11 +31,13 @@ async def tick(dut, n=1):
         await RisingEdge(dut.clk)
 
 
-async def run_gemm(dut, Kt: int) -> dict:
-    """Kt 스텝 GEMM 을 한 번 돌리고 상태별 사이클 수를 돌려준다."""
-    mem = SimpleMem()
-    start_dma(dut, mem, log=False)
+async def run_gemm(dut, mem, Kt: int) -> dict:
+    """Kt 스텝 GEMM 을 한 번 돌리고 상태별 사이클 수를 돌려준다.
 
+    DMA 스텁은 **호출자가 테스트당 한 번만** 띄운다. 여기서 띄우면
+    호출마다 스텁이 쌓여 여러 개가 같은 신호를 구동한다. 그러면 측정이
+    조용히 틀린다 — 이제 start_dma 가 중복을 에러로 막는다.
+    """
     A = np.random.randint(-128, 128, size=(16, Kt), dtype=np.int8)
     B = np.random.randint(-128, 128, size=(Kt, 16), dtype=np.int8)
     act_base, wgt_base, out_base = 0x1000, 0x2000, 0x3000
@@ -108,13 +110,15 @@ async def boot(dut):
 async def test_utilization_profile(dut):
     """여러 Kt 에서 MAC 배열 가동률을 잰다."""
     await boot(dut)
+    mem = SimpleMem()
+    start_dma(dut, mem, log=False)
 
     dut._log.info("")
     dut._log.info(f"{'Kt':>5} {'전체':>8} {'연산':>8} {'페치':>8} {'쓰기':>8} {'가동률':>8}")
     dut._log.info("-" * 52)
 
     for Kt in (1, 4, 16, 64):
-        c = await run_gemm(dut, Kt)
+        c = await run_gemm(dut, mem, Kt)
         total = c["_total"]
         comp = c["C_COMPUTE"]
         fetch = sum(c[s] for s in FETCH)
@@ -130,15 +134,12 @@ async def test_utilization_profile(dut):
     dut._log.info("없어 여기서는 직렬처럼 보인다 — 처리량은 아래 스트림 테스트에서 잰다.")
 
 
-async def run_gemm_stream(dut, Kt: int, n_ops: int) -> dict:
+async def run_gemm_stream(dut, mem, Kt: int, n_ops: int) -> dict:
     """디스크립터 n_ops 개를 연속으로 밀어 넣고 전체 사이클을 잰다.
 
     파이프라인의 값어치는 단일 연산이 아니라 처리량에서 나온다.
     디스크립터 하나만 돌리면 쓰기가 겹칠 상대가 없어 이득이 0이다.
     """
-    mem = SimpleMem()
-    start_dma(dut, mem, log=False)
-
     A = np.random.randint(-128, 128, size=(16, Kt), dtype=np.int8)
     B = np.random.randint(-128, 128, size=(Kt, 16), dtype=np.int8)
     act_base, wgt_base, out_base = 0x1000, 0x2000, 0x3000
@@ -207,13 +208,15 @@ async def test_throughput_streamed(dut):
     코어가 낼 수 있는 처리량은 test_gemm_core_throughput.py 에서 잰다.
     """
     await boot(dut)
+    mem = SimpleMem()
+    start_dma(dut, mem, log=False)
 
     dut._log.info("")
     dut._log.info(f"{'Kt':>5} {'ops':>5} {'전체':>8} {'연산':>8} {'op당':>8} {'가동률':>8}")
     dut._log.info("-" * 52)
 
     for Kt in (1, 16, 64):
-        r = await run_gemm_stream(dut, Kt, n_ops=4)
+        r = await run_gemm_stream(dut, mem, Kt, n_ops=4)
         per = r["total"] / r["ops"]
         util = r["compute"] / r["total"]
         dut._log.info(f"{Kt:>5} {r['ops']:>5} {r['total']:>8} {r['compute']:>8} "

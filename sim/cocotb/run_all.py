@@ -41,6 +41,9 @@ OVERRIDES: dict[str, str] = {
     "test_int4_n32":             "gemm_top",
     "test_tile64":               "gemm_top",
     "test_cluster":              "gemm_cluster",
+    "test_ksplit":               "gemm_top",
+    "test_gemm_e2e":             "gemm_cluster",
+    "test_dma_latency":          "gemm_core",
     "test_mxu128_kstep":         "mxu_bf16_128x128",
     "test_mac_array":            "mac_array",
     "test_gemm_int4":            "gemm_int4",
@@ -105,6 +108,7 @@ VARIANTS: dict[str, tuple[str, dict]] = {
     # 정상상태 디스크립터 간격을 재는 프로파일. 256비트 쪽이 연산 한계에
     # 닿는 구성이라 그쪽으로 등록한다 (128비트는 run_pipe_profile.py 로).
     "test_pipe_profile":    ("gemm_core", {"RD_DATA_W": 256, "BANKS": 2}),
+    "test_dma_latency":     ("gemm_core", {"RD_DATA_W": 256, "BANKS": 2}),
     "test_wr256":           ("gemm_top", {"WR_DATA_W": 256}),
     # 32x32 타일은 K-step 이 32바이트라 읽기 폭 256비트를 요구하고,
     # 출력이 N²=1,024 개라 쓰기도 256비트여야 균형이 맞는다.
@@ -112,6 +116,10 @@ VARIANTS: dict[str, tuple[str, dict]] = {
                                           "WR_DATA_W": 256}),
     "test_int4_n32":        ("gemm_top", {"TILE_N": 32, "RD_DATA_W": 256,
                                           "WR_DATA_W": 256}),
+    # 실제 (M,K,N) 행렬곱 엔드투엔드. 호스트 타일러의 디스크립터 수열을
+    # 그대로 쓴다.
+    "test_gemm_e2e":        ("gemm_cluster", {"TILE_N": 32, "RD_DATA_W": 256,
+                                              "WR_DATA_W": 256, "CORES": 2}),
     # 텐서 병렬 2코어. Kt=256 에서 연산/쓰기/읽기가 완전히 균형이다.
     "test_cluster":         ("gemm_cluster", {"TILE_N": 32, "RD_DATA_W": 256,
                                               "WR_DATA_W": 256, "CORES": 2}),

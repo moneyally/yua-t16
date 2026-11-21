@@ -44,9 +44,8 @@ async def boot(dut):
         await RisingEdge(dut.clk)
 
 
-async def stream(dut, Kt: int, n_ops: int) -> dict:
-    mem = SimpleMem()
-    start_dma(dut, mem, log=False, rd_beat_bytes=RD_BEAT, wr_beat_bytes=16)
+async def stream(dut, mem, Kt: int, n_ops: int) -> dict:
+    """DMA 스텁은 호출자가 테스트당 한 번만 띄운다 (중복은 측정을 깨뜨린다)."""
 
     A = np.random.randint(-128, 128, size=(16, max(Kt, 1)), dtype=np.int8)
     B = np.random.randint(-128, 128, size=(max(Kt, 1), 16), dtype=np.int8)
@@ -112,9 +111,11 @@ async def test_debug_small(dut):
     """소량 연속 — accept/done 짝이 맞는지 본다."""
     global VERBOSE
     await boot(dut)
+    mem = SimpleMem()
+    start_dma(dut, mem, log=False, rd_beat_bytes=RD_BEAT, wr_beat_bytes=16)
     VERBOSE = True
     try:
-        await stream(dut, 1, n_ops=3)
+        await stream(dut, mem, 1, n_ops=3)
     finally:
         VERBOSE = False
 
@@ -122,11 +123,13 @@ async def test_debug_small(dut):
 @cocotb.test()
 async def test_core_streamed_throughput(dut):
     await boot(dut)
+    mem = SimpleMem()
+    start_dma(dut, mem, log=False, rd_beat_bytes=RD_BEAT, wr_beat_bytes=16)
     dut._log.info("")
     dut._log.info(f"{'Kt':>5} {'ops':>5} {'전체':>8} {'연산':>8} {'op당':>9} {'가동률':>8}")
     dut._log.info("-" * 54)
     for Kt in (1, 16, 64):
-        r = await stream(dut, Kt, n_ops=8)
+        r = await stream(dut, mem, Kt, n_ops=8)
         per = r["total"] / r["ops"]
         util = r["compute"] / r["total"]
         dut._log.info(f"{Kt:>5} {r['ops']:>5} {r['total']:>8} {r['compute']:>8} "

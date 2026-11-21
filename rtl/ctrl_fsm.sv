@@ -39,6 +39,9 @@ module ctrl_fsm #(
   output logic        wgt_keep,
   // flags bit1: 가중치가 INT4 로 패킹돼 있다.
   output logic        wgt_int4,
+  // flags bit2/bit3: K 분할 누산 (누산기 유지 / 쓰기 생략)
+  output logic        acc_keep,
+  output logic        no_wb,
 
   input  logic        core_done,
   output logic        busy,
@@ -128,6 +131,8 @@ module ctrl_fsm #(
 
   localparam int FLAG_WGT_KEEP = 0;
   localparam int FLAG_WGT_INT4 = 1;
+  localparam int FLAG_ACC_KEEP = 2;
+  localparam int FLAG_NO_WB    = 3;
 
   wire issue      = (state == ST_DISPATCH) && cmd_ready;
   wire local_done = (state == ST_DONE);
@@ -172,6 +177,8 @@ module ctrl_fsm #(
     Kt       = Kt_r;
     wgt_keep = flags_r[FLAG_WGT_KEEP];
     wgt_int4 = flags_r[FLAG_WGT_INT4];
+    acc_keep = flags_r[FLAG_ACC_KEEP];
+    no_wb    = flags_r[FLAG_NO_WB];
 
     case (state)
       ST_IDLE: begin

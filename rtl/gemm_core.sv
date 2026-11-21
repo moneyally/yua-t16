@@ -50,7 +50,6 @@
 // spec/memory-bandwidth-analysis.md 참조.
 module gemm_core #(
   parameter int MAX_KT = 256,
-  parameter int DMA_BEAT_BYTES = 16,
 
   // DMA 읽기 데이터 폭. 128, 256 또는 512.
   //
@@ -114,6 +113,17 @@ module gemm_core #(
   // 포맷은 **상주 가중치에 딸린 속성**이다 — 건너뛴 디스크립터는 직전에
   // 적재된 가중치의 포맷을 쓴다.
   input  logic        wgt_int4,
+  // ── K 분할 누산 ─────────────────────────────────────────────────
+  // 축소 차원은 디스크립터당 MAX_KT 로 제한된다. 실제 LLM 레이어는
+  // K=4096 이므로 여러 디스크립터로 쪼개 누산해야 한다.
+  //
+  //   acc_keep=0, no_wb=1   첫 조각 (누산기 클리어, 쓰기 없음)
+  //   acc_keep=1, no_wb=1   중간 조각
+  //   acc_keep=1, no_wb=0   마지막 조각 (누산 이어받고 쓰기)
+  //
+  // 조각이 하나뿐이면 acc_keep=0, no_wb=0 이다 (기존 동작).
+  input  logic        acc_keep,   // 누산기를 지우지 않는다
+  input  logic        no_wb,      // 결과를 쓰지 않는다
 
   output logic        done,
   // 상주 가중치를 실제로 쓴 디스크립터 수 / 적재 횟수 (호스트 계측용)
@@ -260,9 +270,13 @@ module gemm_core #(
   // 한 번에 하나만 처리하므로 단일 레지스터로 족하다.
   logic [31:0] Kt_bank  [0:BANKS-1];
   logic [63:0] out_bank [0:BANKS-1];
+  logic        ak_bank  [0:BANKS-1];   // acc_keep
+  logic        nw_bank  [0:BANKS-1];   // no_wb
 
   wire [31:0] Kt_cm  = Kt_bank[cm_bank];
   wire [63:0] out_cm = out_bank[cm_bank];
+  wire        ak_cm  = ak_bank[cm_bank];
+  wire        nw_cm  = nw_bank[cm_bank];
 
   logic [63:0] act_base_r, wgt_base_r;
   logic [15:0] rd_len_r;    // 활성값 (INT8)
@@ -359,6 +373,8 @@ module gemm_core #(
       for (bi = 0; bi < BANKS; bi = bi + 1) begin
         Kt_bank[bi]  <= 32'd0;
         out_bank[bi] <= 64'd0;
+        ak_bank[bi]  <= 1'b0;
+        nw_bank[bi]  <= 1'b0;
       end
     end else if (cmd_accept) begin
       act_base_r <= act_addr;
@@ -376,6 +392,8 @@ module gemm_core #(
 
       Kt_bank[ld_bank]  <= clamp_kt(Kt);
       out_bank[ld_bank] <= out_addr;
+      ak_bank[ld_bank]  <= acc_keep;
+      nw_bank[ld_bank]  <= no_wb;
     end
   end
 
@@ -577,7 +595,10 @@ endgenerate
 
   // 연산 FSM 이 실제로 래치하고 넘어가는 사이클. C_LATCH 에서 쓰기 FSM 을
   // 기다리며 멈춰 있을 수 있으므로 상태만으로는 안 된다.
-  wire cm_latch = (cst == C_LATCH) && (wst == W_IDLE);
+  // no_wb 면 래치하지 않는다 — 누산기에 남겨 두고 다음 조각이 이어받는다.
+  wire cm_latch = (cst == C_LATCH) && !nw_cm && (wst == W_IDLE);
+  // 중간 조각이 통과하는 사이클 (쓰기 없이 완료로 센다).
+  wire cm_pass  = (cst == C_LATCH) &&  nw_cm;
 
 // --------------------------------------------------
 // cocotb / Icarus-safe observable accumulators
@@ -744,7 +765,10 @@ end
   // 세 FSM 중 하나라도 돌고 있거나, 채워진 뱅크가 남아 있으면 바쁘다.
   assign busy = (lst != L_IDLE) || (cst != C_IDLE) || (wst != W_IDLE) || (bank_full != '0);
   // done 은 쓰기가 끝난 시점에 울린다 (결과가 메모리에 실제로 도착한 때).
-  assign done = (wst == W_DONE);
+  // 쓰기가 없는 중간 조각은 연산이 끝난 시점에 울린다. 둘 다 한 사이클
+  // 펄스이고 같은 사이클에 겹치지 않는다 (cm_pass 는 nw_cm 일 때만,
+  // W_DONE 은 쓰기를 시작한 디스크립터에서만 일어난다).
+  assign done = (wst == W_DONE) || cm_pass;
 
   // ----------------------------
   // 로드 FSM (DMA 읽기 채널 + SRAM 쓰기 포트)
@@ -843,7 +867,9 @@ end
       C_IDLE: if (bank_full[cm_bank]) cst_n = C_CLR;
 
       C_CLR: begin
-        mac_acc_clr = 1'b1;
+        // K 분할의 중간/마지막 조각이면 앞 조각의 누산을 이어받는다.
+        // 발행 카운터는 cst==C_CLR 로 따로 리셋되므로 영향이 없다.
+        mac_acc_clr = ~ak_cm;
         if (Kt_cm == 0) cst_n = C_POST;
         else            cst_n = C_COMPUTE;
       end
@@ -872,8 +898,14 @@ end
       end
 
       C_LATCH: begin
-        // acc_out_lat 은 단일 버퍼다. 쓰기 FSM 이 비어야 덮어쓸 수 있다.
-        if (wst == W_IDLE) begin
+        if (nw_cm) begin
+          // K 분할 중간 조각 — 누산기에 남겨 두고 쓰지 않는다.
+          // acc_out_lat 은 건드리지 않는다 (앞 디스크립터의 쓰기가
+          // 아직 진행 중일 수 있다). 쓰기 FSM 을 기다릴 필요도 없다.
+          cm_free = 1'b1;
+          cst_n   = C_IDLE;
+        end else if (wst == W_IDLE) begin
+          // acc_out_lat 은 단일 버퍼다. 쓰기 FSM 이 비어야 덮어쓸 수 있다.
           wr_start = 1'b1;
           cm_free  = 1'b1;    // 뱅크를 로드 FSM 에 돌려준다
           cst_n    = C_IDLE;
