@@ -49,6 +49,7 @@ OVERRIDES: dict[str, str] = {
     "test_mxu_core":             "mxu_core",
     "test_mxu_core_d32":         "mxu_core",
     "test_mxu_core_stream":      "mxu_core",
+    "test_mxu_deep_layer":       "mxu_core",
     "test_mxu_cluster":          "mxu_cluster",
     "test_mxu_cluster_c4":       "mxu_cluster",
     "test_mxu128_kstep":         "mxu_bf16_128x128",
@@ -131,6 +132,12 @@ VARIANTS: dict[str, tuple[str, dict]] = {
     # (결과는 같아야 하고, 느린 것만 다르다).
     "test_mxu_core_stream": ("mxu_core", {"DIM": 16, "RD_DATA_W": 256,
                                           "WR_DATA_W": 128, "STREAM_RD": 1}),
+    # BF16 경로의 실제 레이어 깊이. 원소가 2바이트라 같은 K 에서 INT8 의
+    # 두 배를 읽으므로 요청 쪼개기가 더 일찍 필요하다 (K=4096 이 DIM=16
+    # 에서 단계마다 요청 3개로 쪼개진다).
+    "test_mxu_deep_layer":  ("mxu_core", {"DIM": 16, "RD_DATA_W": 256,
+                                          "WR_DATA_W": 128,
+                                          "MAX_KT": 4096}),
     # BF16 텐서 병렬 클러스터. 코어 수를 바꾸면 드러나는 버그가 따로
     # 있으므로(INT8 쪽 완료 집계는 CORES=4 에서 첫 디스크립터에 깨졌다)
     # 두 코어 수를 다 돈다. MAX_KT 은 균형점 Kt = CORES·DIM²·4/WR_BEAT
