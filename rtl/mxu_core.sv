@@ -38,11 +38,14 @@
 //
 // ── 아직 안 한 것 ────────────────────────────────────────────────
 //
-// `FP32_OUT=1` (조합 `acc_flat`) 경로만 쓴다. `STREAM_RD=1` 은 타일당
-// 변환기 하나를 공유해 타일당 143,394 셀을 아끼지만(20.8%,
-// `spec/pe-fixed-point-redesign.md`), `rd_fp32` 가 사이클당 하나씩
-// 나오므로 쓰기가 `OUT_BEATS` 대신 `ACCS` 사이클이 된다. 그 교환을
-// 재려면 먼저 이 경로가 맞아야 한다.
+// `STREAM_RD` 을 재 봤고 **쓰지 않기로 했다.** 측정값:
+//
+//   DIM=16 WR=128  71.0 →  392.0 사이클/op  (가동률 90.1% → 16.3%)
+//   DIM=32 WR=512  71.0 → 1160.0 사이클/op  (가동률 90.1% →  5.5%)
+//
+// 타일당 143,394 셀(20.8%) 을 아끼지만 처리량을 5.5~16.3배 잃는다.
+// 손실은 ACCS/OUT_BEATS 에 비례해 커지므로 DIM=128 에서는 더 나쁘다.
+// 자세한 이유와 대안 설계점은 `STREAM_RD` 파라미터 주석에 있다.
 module mxu_core #(
   // 축소 차원 상한 (K-step 수). 실제 레이어 깊이까지 올릴 수 있다 —
   // 요청 쪼개기가 16비트 길이 필드 한계를 처리한다.
@@ -57,7 +60,46 @@ module mxu_core #(
   parameter int WR_DATA_W = 128,
 
   // 피연산자 뱅크 수 (2의 거듭제곱). 활성값만 회전한다.
-  parameter int BANKS = 2
+  parameter int BANKS = 2,
+
+  // 누산기 읽기 방식.
+  //   0 (기본): MXU 가 `acc_flat` 에 DIM² FP32 를 조합으로 내보낸다.
+  //             PE 마다 고정소수점→FP32 변환기가 붙는다.
+  //   1       : 타일당 변환기 하나를 공유하고 `rd_idx`/`rd_fp32` 로
+  //             순차로 읽는다. **재 보고 기본값으로 쓰지 않기로 했다.**
+  //
+  // 측정 (둘 다 결과는 일치한다 — 느릴 뿐이다):
+  //
+  //   DIM=16 WR=128  71.0 →  392.0 사이클/op   5.52배
+  //   DIM=32 WR=512  71.0 → 1160.0 사이클/op  16.34배
+  //
+  // 두 가지가 겹쳐서 이렇게 된다.
+  //
+  // 1) 비트 하나를 모으는 데 WPB 사이클이 걸린다. 출력이 행 우선이라
+  //    한 비트의 WPB 개는 같은 행의 연속된 열이고, 그건 **같은 타일**
+  //    안에 있다. 타일마다 변환기가 하나씩 있어 사이클당 TILES 개를
+  //    읽을 수는 있지만, 그 TILES 개는 서로 다른 행/열에 흩어져 있어
+  //    같은 비트에 들어가지 않는다. 그래서 쓰기가 OUT_BEATS 대신
+  //    ACCS + OUT_BEATS 사이클이다.
+  // 2) 겹치기가 사라진다. FP32_OUT=1 은 결과를 acc_lat 에 떠 놓으므로
+  //    다음 디스크립터의 연산과 쓰기가 겹친다. STREAM_RD=1 은 누산기를
+  //    타일에 둔 채 읽으므로 읽는 동안 `mxu_acc_clr` 을 세울 수 없다
+  //    (`rd_hold`). 주기가 max(연산, 쓰기) 가 아니라 합이 된다.
+  //
+  // 래치를 두면 2) 는 없어지지만 ACCS×32 비트 플롭이 생겨 변환기로
+  // 아낀 것을 되돌려준다. 그래서 래치를 두지 않았다 (`LAT_N`).
+  //
+  // ── 측정이 가리키는 대안 ─────────────────────────────────────────
+  //
+  // 문제는 "공유" 가 아니라 "하나" 다. 타일당 변환기를 **WPB 개** 두면
+  // 비트 하나를 한 사이클에 채운다 (같은 타일의 인접한 WPB 열이므로
+  // 가능하다). 그러면 사이클 손실이 0 이고 변환기는 PE 당 하나에서
+  // 타일당 WPB 개로 줄어든다 — WR=512 면 타일당 16 개, 256 개 중
+  // 93.75% 절감이다. 아직 구현하지 않았다.
+  //
+  // 파라미터를 남긴 것은 비용이 0 (기본 0 에서 경로가 elaborate 되지
+  // 않는다) 이고, 대안 설계점의 기준선이 되기 때문이다.
+  parameter int STREAM_RD = 0
 )(
   input  logic clk,
   input  logic rst_n,
@@ -115,6 +157,8 @@ module mxu_core #(
   localparam int OUT_BEATS = ACCS / WPB;
   localparam int OUT_BYTES = ACCS * 4;
   localparam int BEAT_W   = $clog2(OUT_BEATS + 1);
+  localparam int RDP_W    = $clog2(ACCS + 1);       // 순차 읽기 포인터
+  localparam int GTH_W    = (WPB > 1) ? $clog2(WPB) : 1;
   localparam int WR_BEAT_B = WR_DATA_W / 8;
   localparam int RD_BEAT_B = RD_DATA_W / 8;
 
@@ -386,7 +430,7 @@ module mxu_core #(
 
   mxu_bf16_128x128 #(
     .DIM(DIM), .TILE_DIM(16), .TILES(DIM/16), .PAR(DIM/16),
-    .FP32_OUT(1), .STREAM_RD(0)
+    .FP32_OUT((STREAM_RD != 0) ? 0 : 1), .STREAM_RD(STREAM_RD)
   ) u_mxu (
     .clk(clk), .rst_n(rst_n),
     .start(mxu_start), .acc_clr(mxu_acc_clr), .k_steps(16'(Kt_cm)),
@@ -396,23 +440,54 @@ module mxu_core #(
     .rd_idx(mxu_rd_idx), .rd_fp32(mxu_rd_fp32)
   );
 
-  assign mxu_rd_idx = '0;   // STREAM_RD=0 — 쓰지 않는다
+  // ----------------------------
+  // 순차 읽기 포인터 (STREAM_RD=1 일 때만 움직인다)
+  // ----------------------------
+  // 비트 하나에 WPB 개가 들어간다. 공유 변환기는 사이클당 하나를 내므로
+  // 비트 하나를 모으는 데 WPB 사이클이 걸린다. 행 우선 출력이라 한 비트의
+  // WPB 개는 같은 행의 연속된 열이고, 그건 같은 타일 안에 있다 — 타일을
+  // 병렬로 읽어도 한 비트를 더 빨리 채울 수 없다.
+  logic [RDP_W-1:0] rd_ptr;        // 다음에 읽을 누산기
+  logic [GTH_W-1:0] gth_slot;      // 비트 안에서 채울 위치
+  logic [WR_DATA_W-1:0] gather;    // 모으는 중인 비트
+  wire  gth_last = (gth_slot == GTH_W'(WPB-1));
+
+  generate
+    if (STREAM_RD != 0) begin : G_RD_PTR
+      assign mxu_rd_idx = rd_ptr;
+    end else begin : G_RD_TIE
+      assign mxu_rd_idx = '0;   // 쓰지 않는다
+    end
+  endgenerate
 
   // ----------------------------
   // 누산기 래치
   // ----------------------------
-  logic [31:0] acc_lat [0:ACCS-1];
+  // STREAM_RD=1 이면 래치를 두지 않는다. ACCS×32 비트 플롭을 두는 순간
+  // 변환기를 아껴 번 것을 플롭으로 되돌려주는 셈이기 때문이다. 대신
+  // 누산기를 타일 안에 둔 채로 읽어 비트로 바로 모은다. 그래서 읽는
+  // 동안 연산 FSM 이 다음 디스크립터를 시작할 수 없다 — 그게 비용이다.
+  localparam int LAT_N = (STREAM_RD != 0) ? 1 : ACCS;
+  logic [31:0] acc_lat [0:LAT_N-1];
   logic [63:0] wr_addr_r;
 
   wire cm_latch = (cst == C_LATCH) && (wst == W_IDLE);
 
+  // STREAM_RD=1 에서 읽기가 진행 중인 동안 연산 FSM 을 세우는 신호.
+  wire rd_hold = (STREAM_RD != 0) && (wst != W_IDLE);
+
   genvar ai;
   generate
-    for (ai = 0; ai < ACCS; ai++) begin : G_ACC_LAT
-      always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n)        acc_lat[ai] <= 32'd0;
-        else if (cm_latch) acc_lat[ai] <= (Kt_cm != 0) ? acc_flat[ai] : 32'd0;
+    if (STREAM_RD == 0) begin : G_ACC_LAT_EN
+      for (ai = 0; ai < ACCS; ai++) begin : G_ACC_LAT
+        always_ff @(posedge clk or negedge rst_n) begin
+          if (!rst_n)        acc_lat[ai] <= 32'd0;
+          else if (cm_latch) acc_lat[ai] <= (Kt_cm != 0) ? acc_flat[ai] : 32'd0;
+        end
       end
+    end else begin : G_ACC_LAT_OFF
+      always_ff @(posedge clk or negedge rst_n)
+        if (!rst_n) acc_lat[0] <= 32'd0;
     end
   endgenerate
 
@@ -452,31 +527,100 @@ module mxu_core #(
   end
 `endif
 
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-      out_beat   <= '0;
-      wr_data_r  <= '0;
-      wr_valid_r <= 1'b0;
-    end else begin
-      if (wst == W_REQ && wr_req_ready) begin
+  generate
+  if (STREAM_RD == 0) begin : G_WR_PARALLEL
+    // 래치에서 비트를 통째로 떠낸다. 비트당 1 사이클.
+    always_ff @(posedge clk or negedge rst_n) begin
+      if (!rst_n) begin
         out_beat   <= '0;
-        wr_data_r  <= pack_beat(0);
-        wr_valid_r <= 1'b1;
+        wr_data_r  <= '0;
+        wr_valid_r <= 1'b0;
+      end else begin
+        if (wst == W_REQ && wr_req_ready) begin
+          out_beat   <= '0;
+          wr_data_r  <= pack_beat(0);
+          wr_valid_r <= 1'b1;
+        end else if (wst == W_SEND) begin
+          if (wr_valid_r && wr_data_ready) begin
+            if (out_beat == OUT_BEATS-1) begin
+              wr_valid_r <= 1'b0;
+            end else begin
+              out_beat   <= out_beat + 1'b1;
+              wr_data_r  <= pack_beat((out_beat + 1) * WPB);
+              wr_valid_r <= 1'b1;
+            end
+          end
+        end else begin
+          wr_valid_r <= 1'b0;
+        end
+      end
+    end
+    always_ff @(posedge clk or negedge rst_n) begin
+      if (!rst_n) begin
+        rd_ptr   <= '0;
+        gth_slot <= '0;
+        gather   <= '0;
+      end
+    end
+  end else begin : G_WR_STREAM
+    // 공유 변환기에서 사이클당 하나를 받아 비트를 모은다. 비트당 WPB
+    // 사이클. 비트가 차면 들고 있다가 wr_data_ready 를 기다린다.
+    always_ff @(posedge clk or negedge rst_n) begin
+      if (!rst_n) begin
+        out_beat   <= '0;
+        wr_data_r  <= '0;
+        wr_valid_r <= 1'b0;
+        rd_ptr     <= '0;
+        gth_slot   <= '0;
+        gather     <= '0;
+      end else if (wst == W_REQ) begin
+        // 요청이 수락되기 전부터 첫 비트를 모아 둔다. rd_ptr 은
+        // W_DONE 에서 0 으로 돌아간다.
+        out_beat   <= '0;
+        wr_valid_r <= 1'b0;
+        if (rd_ptr < RDP_W'(WPB)) begin
+          gather[gth_slot*32 +: 32] <= x32(mxu_rd_fp32);
+          rd_ptr   <= rd_ptr + 1'b1;
+          gth_slot <= gth_last ? '0 : gth_slot + 1'b1;
+          if (gth_last) begin
+            wr_data_r  <= {x32(mxu_rd_fp32),
+                           gather[WR_DATA_W-33:0]};
+            wr_valid_r <= 1'b1;
+          end
+        end else begin
+          wr_valid_r <= 1'b1;   // 첫 비트는 이미 다 모았다
+        end
       end else if (wst == W_SEND) begin
-        if (wr_valid_r && wr_data_ready) begin
-          if (out_beat == OUT_BEATS-1) begin
-            wr_valid_r <= 1'b0;
-          end else begin
-            out_beat   <= out_beat + 1'b1;
-            wr_data_r  <= pack_beat((out_beat + 1) * WPB);
+        if (wr_valid_r) begin
+          // 들고 있는 비트를 내보내는 중 — 수락될 때까지 읽지 않는다.
+          if (wr_data_ready) begin
+            if (out_beat == OUT_BEATS-1) begin
+              wr_valid_r <= 1'b0;
+            end else begin
+              out_beat   <= out_beat + 1'b1;
+              wr_valid_r <= 1'b0;   // 다음 비트를 모으는 동안 내린다
+            end
+          end
+        end else begin
+          // 다음 비트를 모은다: 사이클당 하나.
+          gather[gth_slot*32 +: 32] <= x32(mxu_rd_fp32);
+          rd_ptr   <= rd_ptr + 1'b1;
+          gth_slot <= gth_last ? '0 : gth_slot + 1'b1;
+          if (gth_last) begin
+            wr_data_r  <= {x32(mxu_rd_fp32), gather[WR_DATA_W-33:0]};
             wr_valid_r <= 1'b1;
           end
         end
       end else begin
         wr_valid_r <= 1'b0;
+        if (wst == W_DONE) begin
+          rd_ptr   <= '0;
+          gth_slot <= '0;
+        end
       end
     end
   end
+  endgenerate
 
   assign wr_data       = wr_data_r;
   assign wr_data_valid = (wst == W_SEND) && wr_valid_r;
@@ -616,7 +760,11 @@ module mxu_core #(
     feed_k         = feed_cnt[ADDR_W-1:0];   // 주소는 ADDR_W 만 쓴다
 
     case (cst)
-      C_IDLE: if (bank_full[cm_bank]) cst_n = C_CLR;
+      // STREAM_RD=1 이면 누산기가 타일 안에 남아 있는 상태로 읽히는
+      // 중이므로, 읽기가 끝날 때까지 다음 디스크립터를 시작할 수 없다.
+      // C_CLR 이 `mxu_acc_clr` 을 세우면 읽는 중인 값을 지워 버린다.
+      // STREAM_RD=0 이면 결과가 acc_lat 에 떠 있으므로 기다릴 필요가 없다.
+      C_IDLE: if (bank_full[cm_bank] && (rd_hold == 1'b0)) cst_n = C_CLR;
 
       // MXU 는 P_IDLE 에서만 acc_clr 을 받고, 같은 사이클에 start 를
       // 받지 않는다 (else-if). 그래서 한 사이클 떼어 놓는다.
@@ -652,6 +800,8 @@ module mxu_core #(
 
       C_LATCH: begin
         // acc_lat 은 단일 버퍼다. 쓰기 FSM 이 비어야 덮어쓸 수 있다.
+        // (STREAM_RD=1 이면 래치가 없고, 쓰기 FSM 이 타일에서 직접
+        //  읽으므로 역시 비어 있어야 한다.)
         if (wst == W_IDLE) begin
           wr_start = 1'b1;
           cm_free  = 1'b1;

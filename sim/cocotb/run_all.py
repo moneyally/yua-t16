@@ -48,6 +48,7 @@ OVERRIDES: dict[str, str] = {
     "test_odd_depth":            "gemm_top",
     "test_mxu_core":             "mxu_core",
     "test_mxu_core_d32":         "mxu_core",
+    "test_mxu_core_stream":      "mxu_core",
     "test_mxu128_kstep":         "mxu_bf16_128x128",
     "test_mac_array":            "mac_array",
     "test_gemm_int4":            "gemm_int4",
@@ -124,6 +125,10 @@ VARIANTS: dict[str, tuple[str, dict]] = {
                                           "WR_DATA_W": 128}),
     "test_mxu_core_d32":    ("mxu_core", {"DIM": 32, "RD_DATA_W": 512,
                                           "WR_DATA_W": 256}),
+    # 공유 변환기 순차 읽기. 쓰지 않기로 한 경로지만 썩지 않게 돈다
+    # (결과는 같아야 하고, 느린 것만 다르다).
+    "test_mxu_core_stream": ("mxu_core", {"DIM": 16, "RD_DATA_W": 256,
+                                          "WR_DATA_W": 128, "STREAM_RD": 1}),
     # 2의 거듭제곱이 아닌 깊이. 뱅크 주소 이어 붙이기가 깨지는 성질을
     # 빠르게 지킨다 (실제 깊이 11008 은 같은 성질, 시뮬이 느리다).
     "test_odd_depth":       ("gemm_top", {"MAX_KT": 300, "TILE_N": 16,

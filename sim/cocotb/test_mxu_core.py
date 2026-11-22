@@ -77,7 +77,9 @@ ACC_LSB = 2.0 ** -ACC_F
 
 def probe_config(dut):
     """구성을 DUT 에서 읽는다 (환경변수 불일치 방지)."""
-    accs = len(dut.acc_lat)
+    # acc_flat 을 센다. acc_lat 은 STREAM_RD=1 에서 1 개로 줄어든다
+    # (래치를 두면 공유 변환기로 아낀 것을 플롭으로 되돌려주므로 둔다).
+    accs = len(dut.acc_flat)
     dim = int(round(accs ** 0.5))
     assert dim * dim == accs, f"누산기 {accs} 가 제곱수가 아니다"
     rd_beat = len(dut.rd_data) // 8
