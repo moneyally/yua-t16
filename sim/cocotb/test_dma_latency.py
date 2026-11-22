@@ -106,7 +106,8 @@ async def measure(dut, mem, N, RD_BEAT, Kt, n_ops, exp, ws=True):
     return sum(steady) / len(steady)
 
 
-async def _sweep(dut, N, RD_BEAT, WR_BEAT, Kt, A, B, exp, ws):
+async def _sweep(dut, N, RD_BEAT, WR_BEAT, Kt, A, B, exp, ws, side="rd"):
+    """side="rd" 는 읽기 지연, "wr" 는 쓰기 지연을 쓸어본다."""
     base = None
     rows = []
     for lat in LATENCIES:
@@ -116,7 +117,9 @@ async def _sweep(dut, N, RD_BEAT, WR_BEAT, Kt, A, B, exp, ws):
         # 첫 스텁이 이겨서 "지연을 넣었는데 손실 0%" 가 된다 — 실제로
         # 그렇게 한 번 속았다. 이제 start_dma 가 중복을 에러로 막는다.
         dma = start_dma(dut, mem, log=False, rd_beat_bytes=RD_BEAT,
-                        wr_beat_bytes=WR_BEAT, rd_latency=lat)
+                        wr_beat_bytes=WR_BEAT,
+                        rd_latency=lat if side == "rd" else 0,
+                        wr_latency=lat if side == "wr" else 0)
         for k in range(Kt):
             mem.write_bytes(0x1000 + N * k,
                             bytes((int(A[i, k]) & 0xFF) for i in range(N)))
@@ -130,7 +133,8 @@ async def _sweep(dut, N, RD_BEAT, WR_BEAT, Kt, A, B, exp, ws):
             int.from_bytes(raw[(i * N + j) * 4:(i * N + j) * 4 + 4],
                            "little", signed=True)
             for i in range(N) for j in range(N)]).reshape(N, N)
-        assert (got == exp).all(), f"지연 {lat} (ws={ws}): 결과 불일치"
+        assert (got == exp).all(), \
+            f"{side} 지연 {lat} (ws={ws}): 결과 불일치"
 
         dma.stop()
         if base is None:
@@ -172,10 +176,26 @@ async def test_pipeline_absorbs_dram_latency(dut):
             tag = "기준" if loss is None else f"{loss:.1f}%"
             dut._log.info(f"  {lat:>10}{per_op:>12.1f}{tag:>10}")
 
+    # ── 쓰기 지연 ────────────────────────────────────────────────
+    # 읽기 지연은 로드 FSM 에만 얹힌다. 쓰기 지연은 쓰기 FSM 에 얹히고,
+    # 쓰기 FSM 은 acc_lat 단일 버퍼를 통해 연산 FSM 과 묶여 있다
+    # (C_LATCH 가 wst == W_IDLE 을 기다린다). 그래서 흡수 여지가 다르다.
+    wr_rows = await _sweep(dut, N, RD_BEAT, WR_BEAT, Kt, A, B, exp,
+                           ws=True, side="wr")
     dut._log.info("")
-    dut._log.info("  지연은 로드 쪽에만 얹힌다. 로드에 여유가 있으면(WS ON)")
-    dut._log.info("  파이프라인이 전부 흡수한다. 로드가 병목이면(WS off)")
-    dut._log.info("  지연이 그대로 주기에 더해진다.")
+    dut._log.info("  쓰기 지연 (WS ON)")
+    dut._log.info(f"  {'쓰기 지연':>10}{'사이클/op':>12}{'손실':>10}")
+    dut._log.info("  " + "-" * 34)
+    for lat, per_op, loss in wr_rows:
+        tag = "기준" if loss is None else f"{loss:.1f}%"
+        dut._log.info(f"  {lat:>10}{per_op:>12.1f}{tag:>10}")
+
+    dut._log.info("")
+    dut._log.info("  읽기 지연은 로드 쪽에만 얹힌다. 로드에 여유가 있으면")
+    dut._log.info("  (WS ON) 파이프라인이 전부 흡수한다. 로드가 병목이면")
+    dut._log.info("  (WS off) 지연이 그대로 주기에 더해진다.")
+    dut._log.info("  쓰기 지연은 acc_lat 단일 버퍼를 통해 연산과 묶여 있어")
+    dut._log.info("  흡수 여지가 다르다 — 위 표가 그 차이다.")
 
     # 측정된 동작을 못박는다. 나빠지면 회귀로 잡힌다.
     ws = {lat: loss for lat, _, loss in results["WS ON (로드 여유 있음)"]}
@@ -194,3 +214,11 @@ async def test_pipeline_absorbs_dram_latency(dut):
     assert off[8] > 10.0, "WS off 인데 지연 8 을 흡수한다 — 측정이 변했다"
     assert off[48] > ws[48] * 3, \
         f"WS off 손실 {off[48]:.1f}% vs WS ON {ws[48]:.1f}% — 차이가 사라졌다"
+
+    # 쓰기 지연: 측정된 동작을 못박는다. 쓰기 FSM 은 acc_lat 단일 버퍼로
+    # 연산과 묶여 있으므로 읽기만큼 흡수하지 못한다.
+    wr = {lat: loss for lat, _, loss in wr_rows}
+    assert wr[8] is not None
+    for lat in LATENCIES[1:]:
+        assert wr[lat] is not None and wr[lat] >= -1.0, \
+            f"쓰기 지연 {lat} 에서 더 빨라졌다 ({wr[lat]:.1f}%) — 측정 오류"

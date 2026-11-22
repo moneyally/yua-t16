@@ -32,7 +32,10 @@ class DMAStub:
         """읽기와 쓰기는 독립 채널이라 폭이 다를 수 있다.
         gemm_core 의 RD_DATA_W 를 넓히면 읽기 비트만 넓어진다.
 
-        rd_latency / wr_latency: 요청 수락과 첫 비트 사이의 사이클 수.
+        rd_latency: 읽기 요청 수락과 첫 비트 사이의 사이클 수.
+        wr_latency: 쓰기 요청 수락 후 컨트롤러가 데이터를 받기 시작할
+                    때까지의 사이클 수 (그 동안 wr_data_ready 를 내린다).
+
         기본 0 은 **낙관적 상한**이다 — 실제 DDR4 는 요청에서 첫 데이터까지
         수십 사이클이 걸린다. 지연을 넣어도 파이프라인이 그것을 흡수해야
         한다 (흡수하지 못하면 설계가 지연에 민감하다는 뜻이고, 그건
@@ -119,6 +122,7 @@ class DMAStub:
         wr_beats = 0
         wr_idx = 0
         wr_done_pulse = False
+        wr_wait = 0          # 남은 지연 사이클
 
         dut.wr_req_ready.value = 1
         dut.wr_data_ready.value = 1
@@ -128,9 +132,13 @@ class DMAStub:
             await RisingEdge(dut.clk)
 
             dut.wr_req_ready.value = 1
-            dut.wr_data_ready.value = 1
+            # 지연 동안은 역압을 준다. 컨트롤러가 아직 받을 준비가 안 된
+            # 상태를 모사한다 (읽기 쪽 rd_latency 의 대응물).
+            dut.wr_data_ready.value = 0 if (wr_active and wr_wait > 0) else 1
             dut.wr_done.value = 1 if wr_done_pulse else 0
             wr_done_pulse = False
+            if wr_active and wr_wait > 0:
+                wr_wait -= 1
 
             await ReadOnly()
 
@@ -145,6 +153,7 @@ class DMAStub:
                 wr_beats = length // self.wr_beat_bytes
                 wr_idx = 0
                 wr_active = True
+                wr_wait = self.wr_latency
 
             if wr_active:
                 if (int(dut.wr_data_valid.value) == 1 and
