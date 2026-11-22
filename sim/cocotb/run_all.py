@@ -49,6 +49,8 @@ OVERRIDES: dict[str, str] = {
     "test_mxu_core":             "mxu_core",
     "test_mxu_core_d32":         "mxu_core",
     "test_mxu_core_stream":      "mxu_core",
+    "test_mxu_cluster":          "mxu_cluster",
+    "test_mxu_cluster_c4":       "mxu_cluster",
     "test_mxu128_kstep":         "mxu_bf16_128x128",
     "test_mac_array":            "mac_array",
     "test_gemm_int4":            "gemm_int4",
@@ -129,6 +131,18 @@ VARIANTS: dict[str, tuple[str, dict]] = {
     # (결과는 같아야 하고, 느린 것만 다르다).
     "test_mxu_core_stream": ("mxu_core", {"DIM": 16, "RD_DATA_W": 256,
                                           "WR_DATA_W": 128, "STREAM_RD": 1}),
+    # BF16 텐서 병렬 클러스터. 코어 수를 바꾸면 드러나는 버그가 따로
+    # 있으므로(INT8 쪽 완료 집계는 CORES=4 에서 첫 디스크립터에 깨졌다)
+    # 두 코어 수를 다 돈다. MAX_KT 은 균형점 Kt = CORES·DIM²·4/WR_BEAT
+    # 를 담을 만큼 둔다.
+    "test_mxu_cluster":     ("mxu_cluster", {"DIM": 16, "CORES": 2,
+                                             "RD_DATA_W": 256,
+                                             "WR_DATA_W": 256,
+                                             "MAX_KT": 1024}),
+    "test_mxu_cluster_c4":  ("mxu_cluster", {"DIM": 16, "CORES": 4,
+                                             "RD_DATA_W": 256,
+                                             "WR_DATA_W": 512,
+                                             "MAX_KT": 1024}),
     # 2의 거듭제곱이 아닌 깊이. 뱅크 주소 이어 붙이기가 깨지는 성질을
     # 빠르게 지킨다 (실제 깊이 11008 은 같은 성질, 시뮬이 느리다).
     "test_odd_depth":       ("gemm_top", {"MAX_KT": 300, "TILE_N": 16,
