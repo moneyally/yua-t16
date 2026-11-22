@@ -28,6 +28,9 @@ MEASURED = {
     "2코어 N=32 wr256":  (256, 262, 2001, 97.7),
     "4코어 N=32 wr256":  (256, 588.5, 1782, 43.5),
     "4코어 N=32 wr512":  (256, 262, 4002, 97.7),
+    # BF16 경로 (run_mxu_core.py)
+    "BF16 DIM=16":       (64, 71, 231, 90.1),
+    "BF16 DIM=32":       (128, 135, 971, 94.8),
 }
 
 
@@ -57,7 +60,7 @@ def test_tile_scaling_is_quadratic_in_macs():
     같이 오르므로 비가 4배를 조금 넘는다.
     """
     by_n = {c.tile_n: c for c in pm.CONFIGS
-            if c.weight_stationary and c.cores == 1
+            if c.weight_stationary and c.cores == 1 and c.elem_bits == 8
             and c.rd_bits == c.tile_n * 8}
     assert set(by_n) == {16, 32, 64}, f"예상 밖 구성: {sorted(by_n)}"
     for lo, hi in ((16, 32), (32, 64)):
@@ -67,6 +70,44 @@ def test_tile_scaling_is_quadratic_in_macs():
     # 가동률이 단조 증가해야 한다
     utils = [by_n[n].utilisation for n in (16, 32, 64)]
     assert utils == sorted(utils), f"가동률이 단조가 아니다: {utils}"
+
+
+def test_bf16_intensity_is_half_of_int8():
+    """BF16 은 원소가 2바이트라 같은 DIM 에서 산술 강도가 절반이다.
+
+    같은 MAC 수에 두 배의 대역폭이 필요하다는 뜻이고, BF16 을 쓸지
+    INT8 을 쓸지의 핵심 교환이다.
+    """
+    for dim in (16, 32):
+        i8 = next(c for c in pm.CONFIGS
+                  if c.tile_n == dim and c.elem_bits == 8 and c.cores == 1
+                  and c.weight_stationary and c.rd_bits == dim * 8)
+        bf = next(c for c in pm.CONFIGS
+                  if c.tile_n == dim and c.elem_bits == 16)
+        assert bf.intensity == pytest.approx(i8.intensity / 2), (
+            f"DIM={dim}: BF16 강도 {bf.intensity}, INT8 {i8.intensity} — "
+            f"절반이어야 한다")
+
+
+def test_bf16_matches_int8_utilisation():
+    """BF16 메모리 경로가 INT8 과 동급이어야 한다.
+
+    같은 DIM 에서 가동률이 크게 떨어지면 메모리 경로가 MXU 를 굶기는
+    것이고, 그게 mxu_core 를 만든 이유다.
+    """
+    for dim in (16, 32):
+        i8 = next(c for c in pm.CONFIGS
+                  if c.tile_n == dim and c.elem_bits == 8 and c.cores == 1
+                  and c.weight_stationary and c.rd_bits == dim * 8)
+        bf = next(c for c in pm.CONFIGS
+                  if c.tile_n == dim and c.elem_bits == 16)
+        assert bf.utilisation > i8.utilisation - 0.02, (
+            f"DIM={dim}: BF16 가동률 {bf.utilisation:.3f} vs "
+            f"INT8 {i8.utilisation:.3f} — 2%p 이상 낮다")
+        # MXU 가 acc_clr/start 를 분리해 받으므로 1 사이클 더 쓴다
+        assert bf.cycles_per_op == i8.cycles_per_op + 1, (
+            f"DIM={dim}: BF16 {bf.cycles_per_op} vs INT8 "
+            f"{i8.cycles_per_op} 사이클 — 차이가 1 이어야 한다")
 
 
 def test_fpga_fit_boundary():

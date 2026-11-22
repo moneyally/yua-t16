@@ -39,13 +39,14 @@ from dataclasses import dataclass, field, asdict
 @dataclass(frozen=True)
 class Config:
     name: str
-    tile_n: int           # MAC 타일 한 변
+    tile_n: int           # MAC 타일 한 변 (BF16 경로에서는 DIM)
     rd_bits: int          # DMA 읽기 폭
     wr_bits: int          # DMA 쓰기 폭
     kt: int               # 측정에 쓴 K-step 수
     cycles_per_op: float  # MEASURED 정상상태 디스크립터 간격
     weight_stationary: bool
     cores: int = 1        # 텐서 병렬 코어 수
+    elem_bits: int = 8    # 피연산자 원소 비트 (INT8=8, BF16=16)
 
     @property
     def macs(self) -> int:
@@ -54,7 +55,7 @@ class Config:
     @property
     def act_bytes_per_desc(self) -> int:
         """디스크립터당 활성값 바이트. 브로드캐스트라 코어 수와 무관하다."""
-        return self.kt * self.tile_n
+        return self.kt * self.tile_n * self.elem_bits // 8
 
     @property
     def intensity(self) -> float:
@@ -96,6 +97,11 @@ CONFIGS = [
     Config("2코어 N=32 wr256",  32, 256, 256, 256, 262,   True, cores=2),
     Config("4코어 N=32 wr256",  32, 256, 256, 256, 588.5, True, cores=4),
     Config("4코어 N=32 wr512",  32, 256, 512, 256, 262,   True, cores=4),
+    # BF16 경로 (rtl/mxu_core.sv). 원소가 16비트라 같은 DIM 에서 K-step
+    # 바이트가 두 배이고, 따라서 산술 강도가 INT8 의 절반이다.
+    #   DIM=16 RD_DATA_W=256 WR_DATA_W=128 python3.13 sim/cocotb/run_mxu_core.py
+    Config("BF16 DIM=16",       16, 256, 128,  64,  71, True, elem_bits=16),
+    Config("BF16 DIM=32",       32, 512, 256, 128, 135, True, elem_bits=16),
 ]
 
 # 최고 측정 구성과 FPGA 설계점.

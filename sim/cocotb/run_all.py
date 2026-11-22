@@ -46,6 +46,8 @@ OVERRIDES: dict[str, str] = {
     "test_dma_latency":          "gemm_core",
     "test_real_layer_depth":     "gemm_top",
     "test_odd_depth":            "gemm_top",
+    "test_mxu_core":             "mxu_core",
+    "test_mxu_core_d32":         "mxu_core",
     "test_mxu128_kstep":         "mxu_bf16_128x128",
     "test_mac_array":            "mac_array",
     "test_gemm_int4":            "gemm_int4",
@@ -116,6 +118,12 @@ VARIANTS: dict[str, tuple[str, dict]] = {
     # 65,504B 를 넘지 못하므로 긴 전송이 쪼개져야 한다.
     "test_real_layer_depth": ("gemm_top", {"MAX_KT": 4096, "TILE_N": 32,
                                            "RD_DATA_W": 256, "WR_DATA_W": 256}),
+    # BF16 MXU 에 메모리 경로를 붙인 코어. DIM 은 K-step 폭(DIM*16)과
+    # 타일 수(DIM/16)를 동시에 바꾸므로 두 구성 다 돈다.
+    "test_mxu_core":        ("mxu_core", {"DIM": 16, "RD_DATA_W": 256,
+                                          "WR_DATA_W": 128}),
+    "test_mxu_core_d32":    ("mxu_core", {"DIM": 32, "RD_DATA_W": 512,
+                                          "WR_DATA_W": 256}),
     # 2의 거듭제곱이 아닌 깊이. 뱅크 주소 이어 붙이기가 깨지는 성질을
     # 빠르게 지킨다 (실제 깊이 11008 은 같은 성질, 시뮬이 느리다).
     "test_odd_depth":       ("gemm_top", {"MAX_KT": 300, "TILE_N": 16,

@@ -115,8 +115,13 @@ module mxu_bf16_128x128 #(
   // STREAM_RD 은 PAR == TILES 일 때만 쓸 수 있다. PAR 이 작으면 누산값이
   // 타일이 아니라 외부 acc_mem 에 있어서 타일을 읽어봐야 의미가 없다.
   localparam int TD_W  = $clog2(TILE_DIM);   // 타일 내 좌표 폭 (4)
-  localparam int TIL_W = $clog2(TILES);      // 타일 번호 폭 (3)
-  localparam int HALF  = TD_W + TIL_W;       // 행/열 한 쪽 폭 (7)
+  // TILES=1 (DIM=TILE_DIM) 이면 $clog2(1)=0 이 되어 폭 0 비트 추출이
+  // 생긴다. 타일이 하나면 타일 번호가 필요 없지만, 아래 슬라이싱이
+  // 폭 0 을 허용하지 않으므로 1 로 올리고 그 비트는 쓰지 않는다.
+  // (DIM=16 한 타일 구성을 쓸 수 있게 하려면 필요하다 — 시뮬레이션이
+  // 훨씬 빠른 구성이고, mxu_core 의 기본값이다.)
+  localparam int TIL_W = (TILES > 1) ? $clog2(TILES) : 1;
+  localparam int HALF  = TD_W + TIL_W;       // 행/열 한 쪽 폭
 
   logic [TD_W*2-1:0] tile_rd_idx;                      // 모든 타일에 같은 값
   logic [31:0]       tile_rd_fp32 [0:PAR-1][0:PAR-1];
@@ -124,13 +129,31 @@ module mxu_bf16_128x128 #(
   logic [TIL_W-1:0] rd_tile_r, rd_tile_c;
   logic [TD_W-1:0]  rd_in_r,   rd_in_c;
 
-  always_comb begin
-    rd_tile_r = rd_idx[2*HALF-1    -: TIL_W];   // row 상위 TIL_W
-    rd_in_r   = rd_idx[2*HALF-TIL_W-1 -: TD_W]; // row 하위 TD_W
-    rd_tile_c = rd_idx[HALF-1      -: TIL_W];   // col 상위 TIL_W
-    rd_in_c   = rd_idx[TD_W-1      -: TD_W];    // col 하위 TD_W
-    tile_rd_idx = {rd_in_r, rd_in_c};
-  end
+  // rd_idx 폭은 $clog2(DIM*DIM) 이다. TILES=1 이면 타일 번호 비트가
+  // 실제로 없으므로 쪼갤 것이 없다.
+  //
+  // 이 분기는 **generate** 여야 한다. 런타임 `if` 로 쓰면 죽은 쪽도
+  // elaborate 되어, TILES=1 에서 rd_idx[9] (8비트 신호) 를 읽는 범위
+  // 초과 경고가 난다.
+  generate
+    if (TILES > 1) begin : G_IDX_TILED
+      always_comb begin
+        rd_tile_r   = rd_idx[2*HALF-1       -: TIL_W];   // row 상위 TIL_W
+        rd_in_r     = rd_idx[2*HALF-TIL_W-1 -: TD_W];    // row 하위 TD_W
+        rd_tile_c   = rd_idx[HALF-1         -: TIL_W];   // col 상위 TIL_W
+        rd_in_c     = rd_idx[TD_W-1         -: TD_W];    // col 하위 TD_W
+        tile_rd_idx = {rd_in_r, rd_in_c};
+      end
+    end else begin : G_IDX_SINGLE
+      always_comb begin
+        rd_tile_r   = '0;
+        rd_tile_c   = '0;
+        rd_in_r     = rd_idx[2*TD_W-1 -: TD_W];
+        rd_in_c     = rd_idx[TD_W-1   -: TD_W];
+        tile_rd_idx = {rd_in_r, rd_in_c};
+      end
+    end
+  endgenerate
 
   genvar gr, gc, gi, gj;
   generate
