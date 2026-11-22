@@ -40,11 +40,15 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 
-# 디스크립터 flags (rtl/ctrl_fsm.sv 의 FLAG_* 와 같아야 한다)
-FLAG_WGT_KEEP = 0x01
-FLAG_WGT_INT4 = 0x02
-FLAG_ACC_KEEP = 0x04
-FLAG_NO_WB    = 0x08
+# 디스크립터 flags. SSOT 는 tools/orbit_mmio_map.py 의 DescFlag 이고
+# 그것이 rtl/ctrl_fsm.sv 의 FLAG_* 와 대조된다. 여기서 다시 정의하면
+# 세 곳이 어긋날 수 있으므로 가져다 쓴다.
+from tools.orbit_mmio_map import DescFlag
+
+FLAG_WGT_KEEP = int(DescFlag.WGT_KEEP)
+FLAG_WGT_INT4 = int(DescFlag.WGT_INT4)
+FLAG_ACC_KEEP = int(DescFlag.ACC_KEEP)
+FLAG_NO_WB    = int(DescFlag.NO_WB)
 
 
 @dataclass(frozen=True)
@@ -142,6 +146,28 @@ class Plan:
     def weight_loads(self) -> int:
         return sum(1 for d in self.descs if d.loads_weights)
 
+    def issue(self, layout: MemLayout) -> list[dict]:
+        """구체적인 디스크립터 인자 목록. 호스트와 시뮬레이션이 공유한다.
+
+        각 항목을 그대로 tools.orbit_desc.pack_gemm(**item) 에 넘길 수 있다.
+        """
+        out = []
+        k0 = {}      # (ib, jb) 별 누적 K 오프셋
+        for d in self.descs:
+            key = (d.ib, d.jb)
+            off = k0.get(key, 0)
+            out.append({
+                "act_addr": layout.act_addr(d.ib, off),
+                "wgt_addr": layout.wgt_addr(d.jb, off),
+                "out_addr": layout.out_addr(d.ib, d.jb),
+                "kt": d.kt,
+                "flags": d.flags,
+                "wgt_stride": layout.wgt_slice_bytes,
+                "out_stride": layout.out_core_bytes,
+            })
+            k0[key] = off + d.kt
+        return out
+
     def report(self) -> None:
         s, c = self.shape, self.cfg
         print(f"GEMM  M={s.M} K={s.K} N={s.N}   "
@@ -161,6 +187,90 @@ class Plan:
             print(f"  ⚠ 패딩으로 {waste:.1f}배를 낭비한다. "
                   f"M={s.M} 이 타일 {c.tile_n} 보다 작으면 구조적으로 그렇다 "
                   f"— 배치를 키워야 한다.")
+
+
+@dataclass(frozen=True)
+class MemLayout:
+    """디스크립터 주소를 계산한다. 호스트와 시뮬레이션이 **같은 코드**를 쓴다.
+
+    이 레이아웃이 RTL 의 기대와 어긋나면 결과가 조용히 0 이 되거나 엉뚱한
+    값이 나온다. `sim/cocotb/test_gemm_e2e.py` 가 이 클래스로 주소를 만들어
+    실제 RTL 과 대조하므로, 거기서 깨지면 여기가 틀린 것이다.
+
+    배치 규칙 (T = tile_n, C = cores):
+
+        활성값   행 타일 ib 마다 A[ib*T:(ib+1)*T, :] 를 K-step 당 T 바이트.
+                 타일 하나가 K*T 바이트. 조각 kb 는 그 안에서 k0*T 오프셋.
+
+        가중치   열 밴드 jb 마다 코어 C 개의 조각이 연달아.
+                 조각 하나가 K*T_w 바이트 (T_w = INT4 면 T/2).
+                 밴드 하나가 C*K*T_w 바이트. 코어 간격이 wgt_stride.
+
+        출력     (ib, jb) 마다 T × T*C, 즉 T*T*4*C 바이트.
+                 코어 간격이 out_stride = T*T*4.
+                 같은 (ib,jb) 의 모든 K 조각이 **같은 주소**에 쓴다
+                 (마지막 조각만 실제로 쓴다).
+    """
+    shape: GemmShape
+    cfg: TileConfig
+    act_base: int
+    wgt_base: int
+    out_base: int
+
+    @property
+    def _t(self) -> int:
+        return self.cfg.tile_n
+
+    @property
+    def _wgt_row_bytes(self) -> int:
+        """가중치 K-step 하나의 바이트. INT4 면 절반이다."""
+        return self._t * self.cfg.wgt_bits // 8
+
+    @property
+    def act_tile_bytes(self) -> int:
+        return self.shape.K * self._t
+
+    @property
+    def wgt_slice_bytes(self) -> int:
+        """코어 하나가 맡는 조각. 이것이 wgt_stride 다."""
+        return self.shape.K * self._wgt_row_bytes
+
+    @property
+    def wgt_band_bytes(self) -> int:
+        return self.wgt_slice_bytes * self.cfg.cores
+
+    @property
+    def out_core_bytes(self) -> int:
+        """코어 하나의 출력. 이것이 out_stride 다."""
+        return self._t * self._t * 4
+
+    @property
+    def out_desc_bytes(self) -> int:
+        return self.out_core_bytes * self.cfg.cores
+
+    def n_row_tiles(self) -> int:
+        return -(-self.shape.M // self._t)
+
+    def n_bands(self) -> int:
+        return -(-self.shape.N // self.cfg.cols_per_desc)
+
+    def act_addr(self, ib: int, k0: int) -> int:
+        return self.act_base + self.act_tile_bytes * ib + k0 * self._t
+
+    def wgt_addr(self, jb: int, k0: int) -> int:
+        return (self.wgt_base + self.wgt_band_bytes * jb
+                + k0 * self._wgt_row_bytes)
+
+    def out_addr(self, ib: int, jb: int) -> int:
+        return self.out_base + self.out_desc_bytes * (ib * self.n_bands() + jb)
+
+    def total_bytes(self) -> dict:
+        """호스트가 잡아야 할 버퍼 크기."""
+        return {
+            "act": self.act_tile_bytes * self.n_row_tiles(),
+            "wgt": self.wgt_band_bytes * self.n_bands(),
+            "out": self.out_desc_bytes * self.n_row_tiles() * self.n_bands(),
+        }
 
 
 def _k_chunks(K: int, max_kt: int) -> list[int]:

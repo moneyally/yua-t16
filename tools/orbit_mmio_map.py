@@ -10,7 +10,7 @@ reg_top uses offset = addr - 0x8030_0000 (20-bit).
 """
 from __future__ import annotations
 from dataclasses import dataclass
-from enum import IntEnum
+from enum import IntEnum, IntFlag
 
 # ═══════════════════════════════════════════════════════════════════
 # Base addresses
@@ -222,11 +222,32 @@ DESC_SIZE = 64  # bytes
 
 # Byte offsets
 DESC_OPCODE_OFF = 0
+DESC_FLAGS_OFF    = 1   # u8  — rtl/ctrl_fsm.sv 의 FLAG_* 비트
 DESC_ACT_ADDR_OFF = 16  # u64 LE
 DESC_WGT_ADDR_OFF = 24
 DESC_OUT_ADDR_OFF = 32
 DESC_KT_OFF       = 40  # u32 LE
+DESC_WGT_STRIDE_OFF = 44  # u32 LE — 클러스터 코어 간 가중치 간격
+DESC_OUT_STRIDE_OFF = 52  # u32 LE — 클러스터 코어 간 출력 간격
 DESC_CRC_OFF      = 63  # CRC-8 over bytes [0:62]
+
+
+class DescFlag(IntFlag):
+    """디스크립터 바이트 1 의 플래그. rtl/ctrl_fsm.sv 의 FLAG_* 가 SSOT 다.
+
+    여기와 RTL 이 어긋나면 하드웨어가 엉뚱한 동작을 조용히 한다 —
+    tests/test_orbit_desc_flags.py 가 RTL 소스와 직접 대조한다.
+
+        WGT_KEEP   가중치 재적재 생략 (SRAM 상주분 사용)
+        WGT_INT4   가중치가 INT4 로 패킹돼 있다
+        ACC_KEEP   누산기를 지우지 않는다 (K 분할 이어받기)
+        NO_WB      결과를 쓰지 않는다 (K 분할 중간 조각)
+    """
+    NONE     = 0
+    WGT_KEEP = 1 << 0
+    WGT_INT4 = 1 << 1
+    ACC_KEEP = 1 << 2
+    NO_WB    = 1 << 3
 
 # Opcodes
 class Opcode(IntEnum):

@@ -1149,3 +1149,113 @@ test_gemm_core_throughput   stream() 안에서 start_dma    → Kt 3개 = 스텁
 `gemm_core` 의 `DMA_BEAT_BYTES` 는 본문에서 아무도 읽지 않는다 — 비트
 바이트 수는 `RD_DATA_W`/`WR_DATA_W` 에서 유도한다. 선언과 클러스터에서의
 전달만 남아 있었다. 제거했다.
+
+---
+
+# 12단계: 호스트가 쓸 수 있게 — 플래그가 닿지 않던 문제
+
+11단계까지 만든 기능 전부에 공통된 결함이 있었다. **호스트 스택이 그것을
+못 썼다.**
+
+```python
+def pack_gemm(act_addr, wgt_addr, out_addr, kt) -> bytes:   # flags 없음
+def add_gemm(self, act=0, wgt=0, out=0, kt=4, ...)          # flags 없음
+```
+
+weight-stationary, INT4, K 분할, 클러스터 스트라이드 — 네 기능이 모두
+디스크립터 플래그와 스트라이드 필드로 제어되는데, 호스트 패커에 그 인자가
+없었다. 즉 **cocotb 테스트에서만 닿고 실제 호스트 경로에서는 쓸 수 없는
+상태**였다. 그리고 `gemm_tiler.py` 는 아무도 쓰지 않았다.
+
+## SSOT 를 세운다
+
+`tools/orbit_mmio_map.py` 에 플래그와 오프셋을 넣었다.
+
+```python
+DESC_FLAGS_OFF      = 1
+DESC_WGT_STRIDE_OFF = 44
+DESC_OUT_STRIDE_OFF = 52
+
+class DescFlag(IntFlag):
+    WGT_KEEP = 1 << 0
+    WGT_INT4 = 1 << 1
+    ACC_KEEP = 1 << 2
+    NO_WB    = 1 << 3
+```
+
+`gemm_tiler.py` 는 자기 복사본을 들고 있었는데 이것을 가져다 쓰게 바꿨다.
+세 곳(RTL / SSOT / 타일러)이 어긋날 수 있던 것이 두 곳이 되고,
+`tests/test_orbit_desc_flags.py` 가 RTL 소스를 직접 파싱해 비교한다.
+
+## 주소 계산을 한 곳으로
+
+`MemLayout` 이 활성값/가중치/출력 주소를 계산한다. 중요한 점은
+**엔드투엔드 cocotb 테스트가 같은 코드를 쓴다**는 것이다.
+
+```python
+layout = MemLayout(shape, cfg, ACT0, WGT0, OUT0)
+for item in plan.issue(layout):
+    desc = pack_gemm(**item)       # 호스트의 실제 패커
+```
+
+테스트가 자기 패커와 자기 주소 계산을 들고 있으면, 바이트 위치가
+어긋나도 테스트는 통과한다. 호스트 경로와 같은 코드를 써야 테스트가
+호스트를 검증한다. 이제 `test_gemm_e2e.py` 가 깨지면 호스트가 틀린 것이다.
+
+## 모양 단위 API
+
+```python
+sched.add_gemm_shape(shape, cfg, act_base, wgt_base, out_base)
+```
+
+(M, K, N) 하나를 디스크립터 수열로 쪼개 큐에 넣는다. 순서와 플래그는
+타일러가, 주소는 `MemLayout` 이 정한다.
+
+## 검증
+
+`tests/test_orbit_desc_flags.py` 15개:
+
+- `DescFlag` 비트 위치가 `rtl/ctrl_fsm.sv` 의 `FLAG_*` 와 같다 (소스 파싱)
+- RTL 이 flags 를 `latched[1]` 에서 읽는다 (소스 파싱)
+- `gemm_cluster` 가 스트라이드를 바이트 44..47 / 52..55 에서 읽는다 (소스 파싱)
+- 모든 플래그 조합이 라운드트립하고 CRC 가 맞는다
+- **flags/stride 바이트를 뒤집으면 CRC 가 깨진다** — 안 깨지면 변조가 통과한다
+- 인자를 안 주면 예전과 같은 바이트 (하위 호환)
+- 타일러가 SSOT 를 쓴다
+- `add_gemm_shape` 가 타일러 계획과 바이트 단위로 일치하는 큐를 만든다
+
+> 교훈: **기능을 만드는 것과 닿게 만드는 것은 다른 일이다.** RTL 측정이
+> 전부 통과하고 문서까지 쓴 뒤에도, 실제 호스트 API 에서는 아무것도
+> 켤 수 없는 상태였다. 11단계 동안 그것을 몰랐다.
+
+---
+
+# 부록: BF16 경로는 아직 가속기가 아니다
+
+남은 일을 정리하다 확인한 사실이다. 이 저장소에는 연산 경로가 둘 있는데
+**이번 작업 전부가 하나에만 들어갔다.**
+
+| | INT8 `gemm_core` | BF16 `mxu_bf16_128x128` |
+|---|---|---|
+| DMA 읽기/쓰기 | 있음 | **없음** |
+| 피연산자 공급 | DMA → SRAM → MAC | `a_col[0:DIM-1]` 포트로 직접 |
+| 3단 파이프라인 / 이중 버퍼링 | 있음 | 없음 |
+| weight-stationary / INT4 / K 분할 | 있음 | 없음 |
+| 텐서 병렬 | 있음 | 없음 |
+
+`rtl/g3_int_top.sv` 에는 DMA 포트가 없고 주석이 이렇게 적고 있다.
+
+```
+//   2. TB drives a_row/b_col via mxu_data_valid
+```
+
+**테스트벤치가 피연산자를 먹여 준다.** 즉 BF16 MXU 는 누산 정확도가
+검증된 연산 블록이지만, 실제 데이터를 스스로 가져오지 못한다.
+
+이것은 "업데이트를 못 받았다" 가 아니라 **"BF16 쪽에는 `gemm_core` 에
+상응하는 것이 없다"** 는 뜻이다. 올리려면 같은 메모리 아키텍처를 가진
+`mxu_core` 를 새로 만들어야 하고, 그건 이번 작업 전체에 맞먹는 규모다.
+
+> 1~5단계에서 BF16 PE 를 고정소수점 누산으로 재설계하고 FP32 변환기를
+> 공유하게 만든 작업(`spec/pe-fixed-point-redesign.md`)은 유효하다.
+> 그것은 연산 블록 안의 일이었다. 바깥의 메모리 경로가 없는 것이다.

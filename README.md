@@ -13,7 +13,7 @@
 | | |
 |---|---|
 | 검증 | cocotb **64/64** 테스트벤치, **234** 테스트, 실패 0 |
-| | pytest **287** 테스트, 실패 0 |
+| | pytest **302** 테스트, 실패 0 |
 | 최고 측정 처리량 | **8,004 INT8 OPS/사이클** (4코어 32×32 또는 단일 64×64, 가동률 97.7%) |
 | FPGA 설계점 | 32×32 타일 — 1,956 OPS/사이클, VC1902 DSP58 예산 내 |
 | 데이터 포맷 | 활성값 INT8, 가중치 INT8 또는 **INT4** |
@@ -220,6 +220,30 @@ Groq 와 Cerebras 는 HBM 대역폭을 키워서 이긴 게 아니라 **DRAM 을
 
 ---
 
+## BF16 경로는 아직 가속기가 아니다
+
+이 저장소에는 연산 경로가 둘 있는데 **하나만 가속기다.**
+
+| | INT8 (`gemm_core`) | BF16 (`mxu_bf16_128x128`) |
+|---|---|---|
+| DMA 읽기/쓰기 | 있음 | **없음** |
+| 피연산자 공급 | DMA → SRAM → MAC | 포트로 배열을 직접 받음 |
+| 3단 파이프라인 | 있음 | 없음 |
+| 이중 버퍼링 | 있음 | 없음 |
+| weight-stationary | 있음 | 없음 |
+| INT4 / K 분할 | 있음 | 없음 |
+| 텐서 병렬 클러스터 | 있음 | 없음 |
+
+`g3_int_top` 에는 DMA 포트가 아예 없고, 주석이 `TB drives data` 라고
+적고 있습니다 — 테스트벤치가 피연산자를 먹여 줍니다. 즉 **BF16 쪽은
+누산이 맞는지 검증된 연산 블록이고, 실제 데이터를 스스로 가져오지
+못합니다.**
+
+이번 작업의 메모리 아키텍처 전부가 `gemm_core` (INT8) 에 있습니다.
+BF16 을 같은 급으로 올리려면 `gemm_core` 에 상응하는 `mxu_core` 가
+필요하고, 그건 작은 일이 아닙니다. 이 표가 그 상태를 정직하게 적어
+둔 것입니다.
+
 ## 측정하지 않은 것
 
 정직하게 적는다. 이 네 가지는 이 저장소에 근거가 없다.
@@ -269,7 +293,8 @@ rtl/
   act_sram.sv         활성값 스테이징 (1W1R, 뱅크)
   wgt_sram.sv         가중치 스테이징 (1W1R, 뱅크)
   bf16_pkg.sv         BF16/FP32 산술 + 고정소수점 누산 (SSOT)
-  mxu_bf16_128x128.sv BF16 MXU (PAR×PAR 타일 격자)
+  mxu_bf16_128x128.sv BF16 MXU — **연산 블록이고 메모리 경로가 없다**
+                      (피연산자를 배열로 받는다. 아래 "BF16 경로" 참조)
   pcie_ep_versal.sv   CPM PCIe 컴플리터 (비트 위치 미검증)
   ...                 reg_top, desc_queue, oom_guard, trace_ring, irq_ctrl
 
@@ -281,8 +306,11 @@ sim/cocotb/
 
 tools/
   perf_model.py       성능 모델 (출처 태그 포함)
-  gemm_tiler.py       (M,K,N) → 디스크립터 수열 + 트래픽 회계
-  orbit_*.py          호스트 스택 (HAL, 디스크립터, CLI, 스케줄러)
+  gemm_tiler.py       (M,K,N) → 디스크립터 수열 + 주소 레이아웃 + 트래픽 회계
+  orbit_mmio_map.py   레지스터/디스크립터 SSOT (DescFlag 포함)
+  orbit_desc.py       디스크립터 패킹/언패킹 + CRC-8
+  orbit_scheduler.py  큐잉 + add_gemm_shape (모양 하나를 수열로)
+  orbit_*.py          나머지 호스트 스택 (HAL, CLI, 트레이스)
 
 spec/
   memory-bandwidth-analysis.md   전 단계 측정 기록 (이 작업의 핵심 문서)
@@ -306,6 +334,27 @@ gemm_cluster #(
 ```
 
 어긋난 조합은 합성 전에 `$fatal` 로 터진다 — 조용히 틀린 값을 내지 않는다.
+
+### 호스트에서 쓰는 법
+
+```python
+from tools.gemm_tiler import GemmShape, TileConfig, MemLayout
+from tools.orbit_scheduler import OrbitScheduler
+
+shape = GemmShape(M=256, K=4096, N=11008)      # 7B ffn up
+cfg   = TileConfig(tile_n=32, cores=4, max_kt=4096, wgt_bits=4)
+
+# 필요한 버퍼 크기
+MemLayout(shape, cfg, 0, 0, 0).total_bytes()
+
+sched = OrbitScheduler(dev)
+sched.add_gemm_shape(shape, cfg, act_base, wgt_base, out_base)
+sched.run()
+```
+
+타일링 순서와 플래그는 타일러가 정하고, 주소는 `MemLayout` 이 계산한다.
+`sim/cocotb/test_gemm_e2e.py` 가 **같은 코드**로 주소와 디스크립터를
+만들어 실제 RTL 과 대조하므로, 호스트의 주소 계산이 검증돼 있다.
 
 디스크립터 flags (바이트 1):
 

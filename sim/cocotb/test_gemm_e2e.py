@@ -23,7 +23,10 @@ from cocotb.triggers import RisingEdge, Timer
 from dma_stub import SimpleMem, start_dma
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from tools.gemm_tiler import GemmShape, TileConfig, tile_gemm  # noqa: E402
+from tools.gemm_tiler import (  # noqa: E402
+    GemmShape, MemLayout, TileConfig, tile_gemm,
+)
+from tools.orbit_desc import pack_gemm, unpack_descriptor  # noqa: E402
 
 
 def u32_le(x): return int(x).to_bytes(4, "little", signed=False)
@@ -40,16 +43,14 @@ def probe_config(dut):
 
 
 def make_desc(act, wgt, out, kt, wgt_stride, out_stride, flags):
-    d = bytearray(64)
-    d[0:1] = bytes([0x02])
-    d[1:2] = bytes([flags])
-    d[16:24] = u64_le(act)
-    d[24:32] = u64_le(wgt)
-    d[32:40] = u64_le(out)
-    d[40:44] = u32_le(kt)
-    d[44:48] = u32_le(wgt_stride)
-    d[52:56] = u32_le(out_stride)
-    return d
+    """호스트의 **실제 패커**를 쓴다 (tools.orbit_desc.pack_gemm).
+
+    테스트가 자기 패커를 들고 있으면 바이트 위치가 어긋나도 테스트는
+    통과한다. 호스트 경로와 같은 코드를 써야 이 테스트가 호스트를
+    검증한다. CRC 도 같이 들어간다 (ctrl_fsm 은 안 보지만 desc_fsm_v2 는 본다).
+    """
+    return bytearray(pack_gemm(act, wgt, out, kt, flags=flags,
+                               wgt_stride=wgt_stride, out_stride=out_stride))
 
 
 async def boot(dut):
@@ -129,49 +130,52 @@ async def test_full_gemm_matches_numpy(dut):
     exp = A.astype(np.int32) @ B.astype(np.int32)
 
     # ── 메모리 레이아웃 ──────────────────────────────────────────
-    # 활성값: 행 타일 ib 마다 A[ib*T:(ib+1)*T, :] 를 K-step 당 T 바이트로.
-    ACT0 = 0x100000
-    act_tile_bytes = K * T
-    for ib in range(-(-M // T)):
-        base = ACT0 + act_tile_bytes * ib
+    # **호스트와 같은 코드**로 주소를 만든다 (tools.gemm_tiler.MemLayout).
+    # 레이아웃이 RTL 의 기대와 어긋나면 여기서 깨진다 — 그것이 이 테스트의
+    # 목적이다.
+    ACT0, WGT0, OUT0 = 0x100000, 0x400000, 0x800000
+    layout = MemLayout(shape, cfg, ACT0, WGT0, OUT0)
+    sizes = layout.total_bytes()
+    dut._log.info(f"  버퍼: 활성값 {sizes['act']:,}B  "
+                  f"가중치 {sizes['wgt']:,}B  출력 {sizes['out']:,}B")
+
+    for ib in range(layout.n_row_tiles()):
+        base = layout.act_addr(ib, 0)
         for k in range(K):
             mem.write_bytes(base + T * k, bytes(
                 (int(A[ib * T + i, k]) & 0xFF) if ib * T + i < M else 0
                 for i in range(T)))
 
-    # 가중치: 열 밴드 jb, 코어 c 마다 B[:, jb*T*CORES + c*T : +T].
-    # 코어 간 간격이 wgt_stride 다.
-    WGT0 = 0x400000
-    wgt_slice_bytes = K * T
-    wgt_band_bytes = wgt_slice_bytes * CORES
-    for jb in range(-(-N // (T * CORES))):
+    for jb in range(layout.n_bands()):
         for c in range(CORES):
             col0 = jb * T * CORES + c * T
-            base = WGT0 + wgt_band_bytes * jb + wgt_slice_bytes * c
+            base = layout.wgt_addr(jb, 0) + layout.wgt_slice_bytes * c
             for k in range(K):
                 mem.write_bytes(base + T * k, bytes(
                     (int(B[k, col0 + j]) & 0xFF) if col0 + j < N else 0
                     for j in range(T)))
 
-    # 출력: 디스크립터마다 T × (T*CORES), 코어 간 간격 T*T*4
-    OUT0 = 0x800000
-    out_desc_bytes = T * T * 4 * CORES
-
     # ── 실행 ─────────────────────────────────────────────────────
+    items = plan.issue(layout)
     total_reqs = 0
-    for n, d in enumerate(plan.descs):
-        act = ACT0 + act_tile_bytes * d.ib
-        wgt = WGT0 + wgt_band_bytes * d.jb
-        out = OUT0 + out_desc_bytes * n
-        total_reqs += await push(dut, make_desc(
-            act, wgt, out, d.kt, wgt_slice_bytes, T * T * 4, d.flags))
+    for item in items:
+        desc = make_desc(item["act_addr"], item["wgt_addr"], item["out_addr"],
+                         item["kt"], item["wgt_stride"], item["out_stride"],
+                         item["flags"])
+        # 호스트 패커가 만든 바이트가 라운드트립하는지도 같이 본다
+        u = unpack_descriptor(bytes(desc))
+        assert u["crc_ok"], "패커가 만든 CRC 가 틀렸다"
+        assert u["act_addr"] == item["act_addr"]
+        assert u["out_stride"] == item["out_stride"]
+        total_reqs += await push(dut, desc)
 
     # ── 결과 조립 ────────────────────────────────────────────────
     got = np.zeros((M, N), dtype=np.int64)
-    for n, d in enumerate(plan.descs):
-        base = OUT0 + out_desc_bytes * n
+    for d in plan.descs:
+        base = layout.out_addr(d.ib, d.jb)
         for c in range(CORES):
-            raw = mem.read_bytes(base + T * T * 4 * c, T * T * 4)
+            raw = mem.read_bytes(base + layout.out_core_bytes * c,
+                                 layout.out_core_bytes)
             for i in range(T):
                 r = d.ib * T + i
                 if r >= M:
@@ -207,6 +211,8 @@ async def test_full_gemm_matches_numpy(dut):
                   f"(활성값 {len(plan.descs)} + 가중치 "
                   f"{plan.weight_loads*CORES})")
     assert total_reqs == len(plan.descs) + plan.weight_loads * CORES
+    dut._log.info("  주소는 tools.gemm_tiler.MemLayout, 디스크립터는 "
+                  "tools.orbit_desc.pack_gemm — 호스트와 같은 코드다")
 
 
 @cocotb.test()

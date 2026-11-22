@@ -73,8 +73,43 @@ class OrbitScheduler:
         self.add_op(pack_nop(), queue, tag or "NOP")
 
     def add_gemm(self, act: int = 0, wgt: int = 0, out: int = 0,
-                 kt: int = 4, queue: int = 0, tag: str = ""):
-        self.add_op(pack_gemm(act, wgt, out, kt), queue, tag or "GEMM")
+                 kt: int = 4, queue: int = 0, tag: str = "",
+                 flags: int = 0, wgt_stride: int = 0, out_stride: int = 0):
+        """GEMM 하나를 큐에 넣는다.
+
+        flags 로 weight-stationary / INT4 / K 분할을 켠다 (DescFlag).
+        모양 단위로 쪼개려면 add_gemm_shape() 를 쓴다.
+        """
+        self.add_op(pack_gemm(act, wgt, out, kt, flags=flags,
+                              wgt_stride=wgt_stride, out_stride=out_stride),
+                    queue, tag or "GEMM")
+
+    def add_gemm_shape(self, shape, cfg, act_base: int, wgt_base: int,
+                       out_base: int, queue: int = 0, tag: str = ""):
+        """(M, K, N) 행렬곱 하나를 디스크립터 수열로 쪼개 큐에 넣는다.
+
+        타일링 순서와 플래그는 tools.gemm_tiler 가 정한다 — weight-stationary
+        는 호스트가 그 순서로 내보낼 때만 값어치가 있다. 주소는 MemLayout
+        이 계산하고, 같은 코드를 sim/cocotb/test_gemm_e2e.py 가 실제 RTL
+        과 대조한다.
+
+        Args:
+            shape: gemm_tiler.GemmShape
+            cfg:   gemm_tiler.TileConfig (하드웨어 파라미터와 맞아야 한다)
+            *_base: 활성값 / 가중치 / 출력 버퍼의 시작 주소.
+                    필요한 크기는 MemLayout.total_bytes() 가 알려준다.
+
+        Returns:
+            넣은 디스크립터 수.
+        """
+        from tools.gemm_tiler import MemLayout, tile_gemm
+
+        layout = MemLayout(shape, cfg, act_base, wgt_base, out_base)
+        plan = tile_gemm(shape, cfg)
+        base_tag = tag or f"GEMM {shape.M}x{shape.K}x{shape.N}"
+        for i, item in enumerate(plan.issue(layout)):
+            self.add_op(pack_gemm(**item), queue, f"{base_tag} #{i}")
+        return len(plan.descs)
 
     def add_unsupported(self, opcode: int, queue: int = 0, tag: str = ""):
         """Add an op with an unsupported opcode (for testing error path)."""
