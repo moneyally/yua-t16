@@ -160,14 +160,18 @@ module mxu_bf16_128x128 #(
     for (gr = 0; gr < PAR; gr++) begin : G_TROW
       for (gc = 0; gc < PAR; gc++) begin : G_TCOL
 
-        logic [15:0] a_s [0:TILE_DIM-1];
-        logic [15:0] b_s [0:TILE_DIM-1];
-        logic [31:0] o   [0:TILE_DIM-1][0:TILE_DIM-1];
+        // 타일 포트는 평탄화돼 있다 (Yosys 가 unpacked 배열 포트를
+        // 파싱하지 못한다 — mxu_bf16_16x16.sv 주석 참고).
+        logic [TILE_DIM*16-1:0]         a_s;
+        logic [TILE_DIM*16-1:0]         b_s;
+        logic [TILE_DIM*TILE_DIM*32-1:0] o;
 
         // 물리 타일 (gr,gc) ← 논리 타일 (grp_r*PAR+gr, grp_c*PAR+gc)
         for (gi = 0; gi < TILE_DIM; gi++) begin : G_SLICE
-          assign a_s[gi] = a_col[(grp_r * PAR + gr) * TILE_DIM + gi];
-          assign b_s[gi] = b_row[(grp_c * PAR + gc) * TILE_DIM + gi];
+          assign a_s[16*gi +: 16] =
+                     a_col[(grp_r * PAR + gr) * TILE_DIM + gi];
+          assign b_s[16*gi +: 16] =
+                     b_row[(grp_c * PAR + gc) * TILE_DIM + gi];
         end
 
         mxu_bf16_16x16 #(
@@ -191,7 +195,8 @@ module mxu_bf16_128x128 #(
         // 절차적 코드에서 인덱싱할 수 있도록 모듈 레벨 배열로 끌어낸다
         for (gi = 0; gi < TILE_DIM; gi++) begin : G_OR
           for (gj = 0; gj < TILE_DIM; gj++) begin : G_OC
-            assign tile_out[gr][gc][gi][gj] = o[gi][gj];
+            assign tile_out[gr][gc][gi][gj] =
+                       o[32*(gi*TILE_DIM + gj) +: 32];
           end
         end
 

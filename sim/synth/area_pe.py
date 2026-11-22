@@ -10,6 +10,27 @@ SRC = [ROOT / "rtl/bf16_pkg.sv",
        ROOT / "sim/synth/tile_bench.sv"]
 
 
+def _why(r) -> str:
+    """합성이 왜 실패했는지 고른다.
+
+    전에는 출력의 **마지막 줄**을 그대로 썼다. Yosys 는 진행 상황을
+    계속 찍으므로, 죽었을 때 마지막 줄이 "14.1. Executing OPT_EXPR
+    pass" 같은 진행 로그가 되어 원인이 전혀 보이지 않았다. 실제 원인을
+    찾는 데 그 메시지는 아무 도움이 되지 않았다. ERROR 줄을 먼저 찾고,
+    없으면 신호로 죽었는지까지 적는다.
+    """
+    out = (r.stdout or "") + "\n" + (r.stderr or "")
+    for line in out.splitlines():
+        if "ERROR" in line:
+            return line.strip()[:200]
+    lines = [l.strip() for l in out.strip().splitlines() if l.strip()]
+    last = lines[-1][:120] if lines else "(출력 없음)"
+    if r.returncode < 0:
+        return (f"신호 {-r.returncode} 로 죽었다 (메모리/디스크 부족일 수 "
+                f"있다). 마지막 진행: {last}")
+    return f"rc={r.returncode}: " + " | ".join(t[:70] for t in lines[-3:])
+
+
 def area(top: str) -> dict:
     srcs = " ".join(str(p) for p in SRC)
     script = (ROOT / "sim/synth/area.ys.in").read_text() \
@@ -21,7 +42,7 @@ def area(top: str) -> dict:
     r = subprocess.run(["yosys", "-s", str(f)],
                        capture_output=True, text=True, cwd=ROOT)
     if r.returncode != 0:
-        return {"error": (r.stderr or r.stdout).strip().splitlines()[-1][:200]}
+        return {"error": _why(r)}
     m = re.search(rf"===\s+{re.escape(top)}\s+===(.*?)(?=\n===|\Z)", r.stdout, re.S)
     body = m.group(1) if m else r.stdout
     def grab(k):

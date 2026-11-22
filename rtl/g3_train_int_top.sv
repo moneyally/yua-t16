@@ -81,11 +81,32 @@ module g3_train_int_top #(
   wire         fwd_clr = (tst == ST_FWD);
   logic [4:0]  fwd_k;
 
+
+  // ── 타일 포트 평탄화 어댑터 ──────────────────────────────────────
+  // `mxu_bf16_16x16` 의 포트가 packed 로 바뀌었다 (Yosys 가 unpacked
+  // 배열 포트를 파싱하지 못한다 — 그 파일 주석 참고). 이 모듈의
+  // 절차적 코드와 포트는 그대로 두고 경계에서만 변환한다.
+  logic [DIM*16-1:0]     fwd_a_flat, fwd_b_flat;
+  logic [DIM*DIM*32-1:0] fwd_acc_flat;
+
+  genvar fa, fb;
+  generate
+    for (fa = 0; fa < DIM; fa++) begin : G_FLAT_IN
+      assign fwd_a_flat[16*fa +: 16] = fwd_a[fa];
+      assign fwd_b_flat[16*fa +: 16] = fwd_b[fa];
+    end
+    for (fa = 0; fa < DIM; fa++) begin : G_FLAT_OR
+      for (fb = 0; fb < DIM; fb++) begin : G_FLAT_OC
+        assign fwd_acc[fa][fb] = fwd_acc_flat[32*(fa*DIM + fb) +: 32];
+      end
+    end
+  endgenerate
+
   mxu_bf16_16x16 u_fwd_mxu (
     .clk(clk), .rst_n(rst_n),
     .en(fwd_en), .acc_clr(fwd_clr),
-    .a_row(fwd_a), .b_col(fwd_b),
-    .acc_out(fwd_acc),
+    .a_row(fwd_a_flat), .b_col(fwd_b_flat),
+    .acc_out(fwd_acc_flat),
     .busy()
   );
 

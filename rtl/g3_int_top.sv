@@ -156,11 +156,36 @@ module g3_int_top #(
   assign mxu_en  = (mxu_st == MXU_ACTIVE) && mxu_data_valid;
   assign mxu_clr = fsm_mxu_cmd_valid && fsm_mxu_cmd_ready; // clear on new dispatch
 
+
+  // ── 타일 포트 평탄화 어댑터 ──────────────────────────────────────
+  // `mxu_bf16_16x16` 의 포트가 packed 로 바뀌었다 (Yosys 가 unpacked
+  // 배열 포트를 파싱하지 못한다 — 그 파일 주석 참고). 이 모듈의
+  // 절차적 코드와 포트는 그대로 두고 경계에서만 변환한다.
+  logic [MXU_ROWS*16-1:0]           mxu_a_flat;
+  logic [MXU_COLS*16-1:0]           mxu_b_flat;
+  logic [MXU_ROWS*MXU_COLS*32-1:0]  mxu_acc_flat;
+
+  genvar fa, fb;
+  generate
+    for (fa = 0; fa < MXU_ROWS; fa++) begin : G_FLAT_A
+      assign mxu_a_flat[16*fa +: 16] = mxu_a_row[fa];
+    end
+    for (fa = 0; fa < MXU_COLS; fa++) begin : G_FLAT_B
+      assign mxu_b_flat[16*fa +: 16] = mxu_b_col[fa];
+    end
+    for (fa = 0; fa < MXU_ROWS; fa++) begin : G_FLAT_OR
+      for (fb = 0; fb < MXU_COLS; fb++) begin : G_FLAT_OC
+        assign mxu_acc[fa][fb] =
+                   mxu_acc_flat[32*(fa*MXU_COLS + fb) +: 32];
+      end
+    end
+  endgenerate
+
   mxu_bf16_16x16 u_mxu (
     .clk(clk), .rst_n(rst_n),
     .en(mxu_en), .acc_clr(mxu_clr),
-    .a_row(mxu_a_row), .b_col(mxu_b_col),
-    .acc_out(mxu_acc),
+    .a_row(mxu_a_flat), .b_col(mxu_b_flat),
+    .acc_out(mxu_acc_flat),
     .busy()
   );
 

@@ -79,11 +79,32 @@ module backward_engine #(
   wire mxu_en_comb = (st == ST_COMPUTE);
   wire mxu_clr_comb = (st == ST_CLEAR);
 
+
+  // ── 타일 포트 평탄화 어댑터 ──────────────────────────────────────
+  // `mxu_bf16_16x16` 의 포트가 packed 로 바뀌었다 (Yosys 가 unpacked
+  // 배열 포트를 파싱하지 못한다 — 그 파일 주석 참고). 이 모듈의
+  // 절차적 코드와 포트는 그대로 두고 경계에서만 변환한다.
+  logic [DIM*16-1:0]      mxu_a_flat, mxu_b_flat;
+  logic [DIM*DIM*32-1:0]  mxu_acc_flat;
+
+  genvar fa, fb;
+  generate
+    for (fa = 0; fa < DIM; fa++) begin : G_FLAT_IN
+      assign mxu_a_flat[16*fa +: 16] = mxu_a[fa];
+      assign mxu_b_flat[16*fa +: 16] = mxu_b[fa];
+    end
+    for (fa = 0; fa < DIM; fa++) begin : G_FLAT_OR
+      for (fb = 0; fb < DIM; fb++) begin : G_FLAT_OC
+        assign mxu_acc[fa][fb] = mxu_acc_flat[32*(fa*DIM + fb) +: 32];
+      end
+    end
+  endgenerate
+
   mxu_bf16_16x16 u_mxu (
     .clk(clk), .rst_n(rst_n),
     .en(mxu_en_comb), .acc_clr(mxu_clr_comb),
-    .a_row(mxu_a), .b_col(mxu_b),
-    .acc_out(mxu_acc),
+    .a_row(mxu_a_flat), .b_col(mxu_b_flat),
+    .acc_out(mxu_acc_flat),
     .busy()
   );
 

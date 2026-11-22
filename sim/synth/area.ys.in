@@ -2,6 +2,10 @@
 # 절대 면적이 아니라 "재설계 전/후 비교"를 위한 상대 지표다.
 read_verilog -sv @SOURCES@
 hierarchy -top @TOP@
+# flatten 이 없으면 `stat` 이 최상위 모듈의 **인스턴스 수**를 센다.
+# 하위 모듈이 있는 top 에서 "셀 1개" 같은 값이 나오는 이유다.
+# (지금까지 공개한 수치는 전부 하위 모듈이 없는 벤치여서 영향이 없었다.)
+flatten
 proc; opt; fsm; opt; memory; opt
 techmap; opt
 abc -g simple

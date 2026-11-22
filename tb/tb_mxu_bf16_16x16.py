@@ -32,13 +32,32 @@ def fp32_bits_to_float(bits):
     return struct.unpack('>f', struct.pack('>I', bits & 0xFFFFFFFF))[0]
 
 
+# ── packed 포트 ───────────────────────────────────────────────────
+# a_row / b_col / acc_out 은 평탄화된 packed 벡터다 (Yosys 가 unpacked
+# 배열 포트를 파싱하지 못해서 — rtl/mxu_bf16_16x16.sv 주석 참고).
+# 낮은 인덱스가 하위 비트이고, acc_out 은 행 우선이다.
+COLS = 16
+
+
+def lanes(vals, width=16):
+    """워드 리스트 → packed 벡터 정수. 적게 주면 나머지는 0 이다."""
+    v = 0
+    for i, x in enumerate(vals):
+        v |= (int(x) & ((1 << width) - 1)) << (width * i)
+    return v
+
+
+def acc_at(dut, r, c):
+    """acc_out 의 원소 (r,c) 를 FP32 비트로 돌려준다."""
+    return (int(dut.acc_out.value) >> (32 * (r * COLS + c))) & 0xFFFFFFFF
+
+
 async def reset_dut(dut):
     dut.rst_n.value = 0
     dut.en.value = 0
     dut.acc_clr.value = 0
-    for i in range(16):
-        dut.a_row[i].value = 0
-        dut.b_col[i].value = 0
+    dut.a_row.value = 0
+    dut.b_col.value = 0
     await Timer(50, unit="ns")
     dut.rst_n.value = 1
     await RisingEdge(dut.clk)
@@ -57,16 +76,16 @@ async def test_single_multiply(dut):
     await RisingEdge(dut.clk)
     dut.acc_clr.value = 0
 
-    # Set a_row[0] = 1.0, b_col[0] = 2.0, all others 0
-    dut.a_row[0].value = float_to_bf16(1.0)
-    dut.b_col[0].value = float_to_bf16(2.0)
+    # a_row 레인 0 = 1.0, b_col 레인 0 = 2.0, 나머지는 0
+    dut.a_row.value = lanes([float_to_bf16(1.0)])
+    dut.b_col.value = lanes([float_to_bf16(2.0)])
     dut.en.value = 1
     await RisingEdge(dut.clk)
     dut.en.value = 0
     await RisingEdge(dut.clk)
 
-    # Read acc_out[0][0]
-    result_bits = int(dut.acc_out[0][0].value)
+    # acc_out 원소 (0,0)
+    result_bits = acc_at(dut, 0, 0)
     result = fp32_bits_to_float(result_bits)
 
     assert abs(result - 2.0) < 0.01, f"Expected ~2.0, got {result} (bits={result_bits:#010x})"
@@ -85,14 +104,14 @@ async def test_accumulate_4_steps(dut):
 
     # 4 MAC steps
     for _ in range(4):
-        dut.a_row[0].value = float_to_bf16(1.0)
-        dut.b_col[0].value = float_to_bf16(1.0)
+        dut.a_row.value = lanes([float_to_bf16(1.0)])
+        dut.b_col.value = lanes([float_to_bf16(1.0)])
         dut.en.value = 1
         await RisingEdge(dut.clk)
     dut.en.value = 0
     await RisingEdge(dut.clk)
 
-    result = fp32_bits_to_float(int(dut.acc_out[0][0].value))
+    result = fp32_bits_to_float(acc_at(dut, 0, 0))
     assert abs(result - 4.0) < 0.1, f"Expected ~4.0, got {result}"
 
 
@@ -107,14 +126,14 @@ async def test_zero_multiply(dut):
     await RisingEdge(dut.clk)
     dut.acc_clr.value = 0
 
-    dut.a_row[0].value = float_to_bf16(0.0)
-    dut.b_col[0].value = float_to_bf16(42.0)
+    dut.a_row.value = lanes([float_to_bf16(0.0)])
+    dut.b_col.value = lanes([float_to_bf16(42.0)])
     dut.en.value = 1
     await RisingEdge(dut.clk)
     dut.en.value = 0
     await RisingEdge(dut.clk)
 
-    result = fp32_bits_to_float(int(dut.acc_out[0][0].value))
+    result = fp32_bits_to_float(acc_at(dut, 0, 0))
     assert abs(result) < 0.001, f"Expected 0.0, got {result}"
 
 
@@ -130,15 +149,15 @@ async def test_clear(dut):
     await RisingEdge(dut.clk)
     dut.acc_clr.value = 0
 
-    dut.a_row[0].value = float_to_bf16(5.0)
-    dut.b_col[0].value = float_to_bf16(3.0)
+    dut.a_row.value = lanes([float_to_bf16(5.0)])
+    dut.b_col.value = lanes([float_to_bf16(3.0)])
     dut.en.value = 1
     await RisingEdge(dut.clk)
     dut.en.value = 0
     await RisingEdge(dut.clk)
 
     # Verify non-zero
-    result1 = fp32_bits_to_float(int(dut.acc_out[0][0].value))
+    result1 = fp32_bits_to_float(acc_at(dut, 0, 0))
     assert result1 != 0.0, "Should be non-zero before clear"
 
     # Clear
@@ -147,7 +166,7 @@ async def test_clear(dut):
     dut.acc_clr.value = 0
     await RisingEdge(dut.clk)
 
-    result2 = fp32_bits_to_float(int(dut.acc_out[0][0].value))
+    result2 = fp32_bits_to_float(acc_at(dut, 0, 0))
     assert result2 == 0.0, f"Should be 0 after clear, got {result2}"
 
 
@@ -162,12 +181,12 @@ async def test_negative_multiply(dut):
     await RisingEdge(dut.clk)
     dut.acc_clr.value = 0
 
-    dut.a_row[0].value = float_to_bf16(-2.0)
-    dut.b_col[0].value = float_to_bf16(3.0)
+    dut.a_row.value = lanes([float_to_bf16(-2.0)])
+    dut.b_col.value = lanes([float_to_bf16(3.0)])
     dut.en.value = 1
     await RisingEdge(dut.clk)
     dut.en.value = 0
     await RisingEdge(dut.clk)
 
-    result = fp32_bits_to_float(int(dut.acc_out[0][0].value))
+    result = fp32_bits_to_float(acc_at(dut, 0, 0))
     assert abs(result - (-6.0)) < 0.1, f"Expected ~-6.0, got {result}"
