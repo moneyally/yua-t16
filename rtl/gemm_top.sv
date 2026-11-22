@@ -8,7 +8,8 @@ module gemm_top #(
   parameter int RD_DATA_W = 128,
   parameter int BANKS     = 2,
   parameter int WR_DATA_W = 128,
-  parameter int TILE_N    = 16
+  parameter int TILE_N    = 16,
+  parameter int OUT_BUFS  = 1
 )(
   input  logic        clk,
   input  logic        rst_n,
@@ -150,7 +151,7 @@ module gemm_top #(
   // -------------------------
   // GEMM CORE
   // -------------------------
-  gemm_core #(.MAX_KT(MAX_KT), .RD_DATA_W(RD_DATA_W), .BANKS(BANKS), .WR_DATA_W(WR_DATA_W), .TILE_N(TILE_N)) u_core (
+  gemm_core #(.MAX_KT(MAX_KT), .RD_DATA_W(RD_DATA_W), .BANKS(BANKS), .WR_DATA_W(WR_DATA_W), .TILE_N(TILE_N), .OUT_BUFS(OUT_BUFS)) u_core (
     .clk(clk),
     .rst_n(rst_n),
 

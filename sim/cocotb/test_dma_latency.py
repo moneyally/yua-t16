@@ -35,7 +35,7 @@ def u64_le(x): return int(x).to_bytes(8, "little", signed=False)
 
 
 def probe_config(dut):
-    accs = len(dut.acc_out_lat)
+    accs = len(dut.acc_out_flat)
     n = int(round(accs ** 0.5))
     assert n * n == accs
     return n, len(dut.rd_data) // 8, len(dut.wr_data) // 8
@@ -155,14 +155,21 @@ async def test_pipeline_absorbs_dram_latency(dut):
     """
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     N, RD_BEAT, WR_BEAT = probe_config(dut)
-    Kt = min(128, (N * N * 4) // WR_BEAT)
+    # 쓰기 비트 수에 맞춰 Kt 를 고르되 64 보다 아래로는 내리지 않는다.
+    # 쓰기 폭이 넓으면 OUT_BEATS 가 작아지는데, Kt 까지 같이 줄이면
+    # 쓰기 채널의 여유가 사라져 이중 버퍼의 효과를 볼 수 없다.
+    Kt = min(128, max(64, (N * N * 4) // WR_BEAT))
     rng = np.random.default_rng(13579)
     A = rng.integers(-128, 128, size=(N, Kt), dtype=np.int8)
     B = rng.integers(-128, 128, size=(Kt, N), dtype=np.int8)
     exp = A.astype(np.int32) @ B.astype(np.int32)
 
+    out_beats = (N * N * 4) // WR_BEAT
+    out_bufs  = int(dut.OUT_BUFS.value)
+
     dut._log.info("")
-    dut._log.info(f"  TILE_N={N} Kt={Kt}")
+    dut._log.info(f"  TILE_N={N} Kt={Kt} RD={RD_BEAT*8}비트 WR={WR_BEAT*8}비트"
+                  f" OUT_BUFS={out_bufs}")
     results = {}
     for label, ws in (("WS ON (로드 여유 있음)", True),
                       ("WS off (로드가 병목)", False)):
@@ -177,9 +184,20 @@ async def test_pipeline_absorbs_dram_latency(dut):
             dut._log.info(f"  {lat:>10}{per_op:>12.1f}{tag:>10}")
 
     # ── 쓰기 지연 ────────────────────────────────────────────────
-    # 읽기 지연은 로드 FSM 에만 얹힌다. 쓰기 지연은 쓰기 FSM 에 얹히고,
-    # 쓰기 FSM 은 acc_lat 단일 버퍼를 통해 연산 FSM 과 묶여 있다
-    # (C_LATCH 가 wst == W_IDLE 을 기다린다). 그래서 흡수 여지가 다르다.
+    # 쓰기 지연의 흡수 여부를 가르는 것은 **쓰기 채널의 점유율 하나**다.
+    # 출력 래치를 이중으로 올려도(OUT_BUFS=2) 숫자가 바뀌지 않는다 —
+    # 측정해 확인했고, 이유는 gemm_core.sv 의 OUT_BUFS 주석에 있다.
+    # 요점: 디스크립터마다 쓰기가 한 번이고 채널이 하나이므로, 처리량은
+    # (지연 + OUT_BEATS) 가 주기에 들어가느냐로만 정해진다.
+    #
+    # 그래서 이 테스트는 OUT_BUFS 를 읽어 두되 기대는 점유율로만 세운다.
+    # OUT_BUFS 를 바꿔 돌려도 같은 단언이 통과해야 한다 — 그게 위
+    # 결론의 회귀 보호다.
+    base_cycles = results["WS ON (로드 여유 있음)"][0][1]
+    wr_occupancy = (out_beats + 2) / base_cycles
+    # 흡수 조건은 채널 여유 하나다 (OUT_BUFS 와 무관).
+    wr_absorbable = wr_occupancy < 0.5
+
     wr_rows = await _sweep(dut, N, RD_BEAT, WR_BEAT, Kt, A, B, exp,
                            ws=True, side="wr")
     dut._log.info("")
@@ -194,8 +212,10 @@ async def test_pipeline_absorbs_dram_latency(dut):
     dut._log.info("  읽기 지연은 로드 쪽에만 얹힌다. 로드에 여유가 있으면")
     dut._log.info("  (WS ON) 파이프라인이 전부 흡수한다. 로드가 병목이면")
     dut._log.info("  (WS off) 지연이 그대로 주기에 더해진다.")
-    dut._log.info("  쓰기 지연은 acc_lat 단일 버퍼를 통해 연산과 묶여 있어")
-    dut._log.info("  흡수 여지가 다르다 — 위 표가 그 차이다.")
+    dut._log.info(f"  쓰기: OUT_BEATS={out_beats} / 주기 {base_cycles:.0f} 사이클"
+                  f" = 채널 {wr_occupancy:.0%} 바쁨, OUT_BUFS={out_bufs}")
+    dut._log.info(f"  → 흡수 기대: {'있음 (채널 여유)' if wr_absorbable else '없음 (채널 포화)'}"
+                  f" — OUT_BUFS 와 무관하다")
 
     # 측정된 동작을 못박는다. 나빠지면 회귀로 잡힌다.
     ws = {lat: loss for lat, _, loss in results["WS ON (로드 여유 있음)"]}
@@ -215,10 +235,23 @@ async def test_pipeline_absorbs_dram_latency(dut):
     assert off[48] > ws[48] * 3, \
         f"WS off 손실 {off[48]:.1f}% vs WS ON {ws[48]:.1f}% — 차이가 사라졌다"
 
-    # 쓰기 지연: 측정된 동작을 못박는다. 쓰기 FSM 은 acc_lat 단일 버퍼로
-    # 연산과 묶여 있으므로 읽기만큼 흡수하지 못한다.
+    # 쓰기 지연.
     wr = {lat: loss for lat, _, loss in wr_rows}
     assert wr[8] is not None
     for lat in LATENCIES[1:]:
         assert wr[lat] is not None and wr[lat] >= -1.0, \
             f"쓰기 지연 {lat} 에서 더 빨라졌다 ({wr[lat]:.1f}%) — 측정 오류"
+
+    if wr_absorbable:
+        # 채널에 여유가 있으면 지연 48 까지 전부 흡수한다. 단일 버퍼로도
+        # 그렇다 — 측정값이다 (WR=512 에서 0/0/0/0%).
+        for lat in LATENCIES[1:]:
+            assert wr[lat] < 2.0, (
+                f"쓰기 채널이 {wr_occupancy:.0%} 바쁠 뿐인데 지연 {lat} 에서 "
+                f"{wr[lat]:.1f}% 를 잃는다 (OUT_BUFS={out_bufs})")
+    else:
+        # 채널이 포화면 지연이 그대로 얹힌다. 이중 버퍼로도 안 된다.
+        assert wr[24] > 10.0, (
+            f"쓰기 채널이 {wr_occupancy:.0%} 바쁜데 지연 24 를 흡수한다 "
+            f"({wr[24]:.1f}%) — 측정이 변했다")
+        assert wr[48] > wr[24], "지연이 커졌는데 손실이 줄었다 — 측정 오류"

@@ -34,7 +34,7 @@ def u64_le(x): return int(x).to_bytes(8, "little", signed=False)
 def probe_config(dut):
     """구성을 DUT 에서 읽는다 (환경변수 불일치 방지)."""
     cores = len(dut.CORE)
-    accs = len(dut.CORE[0].u_core.acc_out_lat)
+    accs = len(dut.CORE[0].u_core.acc_out_flat)
     n = int(round(accs ** 0.5))
     assert n * n == accs
     return cores, n, len(dut.rd_data) // 8, len(dut.wr_data) // 8

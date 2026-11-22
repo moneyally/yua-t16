@@ -35,7 +35,7 @@ def u64_le(x): return int(x).to_bytes(8, "little", signed=False)
 
 def probe_config(dut):
     cores = len(dut.CORE)
-    accs = len(dut.CORE[0].u_core.acc_out_lat)
+    accs = len(dut.CORE[0].u_core.acc_out_flat)
     n = int(round(accs ** 0.5))
     assert n * n == accs
     max_kt = len(dut.CORE[0].u_core.u_act.mem) * (len(dut.rd_data) // 8 // n) // 2

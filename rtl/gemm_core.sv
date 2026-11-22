@@ -19,8 +19,9 @@
 //
 //   1) 피연산자 SRAM: 2 뱅크 이중 버퍼. 로드 FSM 이 뱅크 B 를 채우는
 //      동안 연산 FSM 이 뱅크 A 를 읽는다. bank_full 로 주고받는다.
-//   2) acc_out_lat: 단일 버퍼. 연산 FSM 은 C_LATCH 에서 쓰기 FSM 이
-//      비기를 기다린다.
+//   2) acc_buf: OUT_BUFS 벌의 출력 래치. 기본 1 이다 — 이중으로 올려
+//      봤지만 어느 구성에서도 처리량이 바뀌지 않았다. 이유는
+//      OUT_BUFS 파라미터 주석에 측정값과 함께 적었다.
 //
 // Kt=64 / RD_DATA_W=256 기준 각 단계의 사이클:
 //   로드  1 + 32 + 1 + 32 = 66
@@ -93,7 +94,37 @@ module gemm_core #(
   //
   // 제약: RD_DATA_W 가 한 K-step (N 바이트) 의 배수여야 한다.
   // 즉 N=32 는 RD_DATA_W >= 256 을 요구한다.
-  parameter int TILE_N = 16
+  parameter int TILE_N = 16,
+
+  // 출력 래치(acc_buf) 의 깊이. **기본 1 이다. 2 로 올려도 아무것도
+  // 빨라지지 않는다** — 재 보고 내린 결론이고, 근거를 남긴다.
+  //
+  // 피연산자 SRAM 을 이중 버퍼로 만들었을 때 로드가 지연 24 사이클까지
+  // 완전히 흡수됐으므로, 쓰기 쪽도 같을 것이라고 예상했다. 틀렸다.
+  //
+  //   N=16 RD=256 WR=128 (쓰기 채널 94% 바쁨)
+  //     쓰기 지연 0/8/24/48 → 70/75/91/115 사이클, OUT_BUFS 1 과 2 동일
+  //   N=16 RD=256 WR=512 (쓰기 채널 26% 바쁨)
+  //     쓰기 지연 0/8/24/48 → 70/70/70/70 사이클, OUT_BUFS 1 과 2 동일
+  //   N=64 RD=512 WR=512 (쓰기 채널 98% 바쁨)
+  //     262.0 사이클/op, 가동률 97.7%, OUT_BUFS 1 과 2 동일
+  //
+  // 이유는 산술이다. 디스크립터마다 쓰기가 한 번이고 쓰기 채널은
+  // 하나다. 그러면 처리량을 유지하려면 (지연 + OUT_BEATS + 오버헤드)
+  // 가 디스크립터 주기 안에 들어와야 한다 — 버퍼 수와 무관하게.
+  // 단일 버퍼가 연산을 세우는 경우는 다음 C_LATCH 시점에 앞 쓰기가
+  // 아직 날아가고 있을 때뿐인데, 그건 쓰기 길이가 주기에 맞먹는다는
+  // 뜻이고 그때는 채널 자체가 한계이므로 버퍼가 둘이어도 똑같다.
+  // 즉 이중 버퍼는 **존재하지 않는 틈**을 메우려는 것이었다.
+  //
+  // 쓰기 지연에 둔감해지는 길은 버퍼가 아니라 WR_DATA_W 를 넓혀
+  // 채널에 여유를 만드는 것이다 (94% → 26% 로 내리면 지연 48 까지
+  // 손실 0%).
+  //
+  // 파라미터를 남긴 것은 비용이 0 이고(기본 1 에서 플롭이 늘지 않는다)
+  // 구성이 바뀌었을 때 같은 A/B 를 다시 돌릴 수 있기 때문이다.
+  // 2 의 비용은 누산기 한 벌의 플롭 — N=64 에서 256 Kb 다.
+  parameter int OUT_BUFS = 1
 )(
   input  logic clk,
   input  logic rst_n,
@@ -284,10 +315,18 @@ module gemm_core #(
   cstate_t cst, cst_n;
   wstate_t wst, wst_n;
 
+  // 출력 래치 포인터. OUT_BUFS=1 에서도 폭 1 을 유지한다.
+  localparam int OBUF_W = (OUT_BUFS > 1) ? $clog2(OUT_BUFS) : 1;
+  logic [OUT_BUFS-1:0] obuf_full;  // 래치 완료, 쓰기 대기
+  logic [OBUF_W-1:0]   obuf_wp;    // 연산 FSM 이 쓰는 버퍼
+  logic [OBUF_W-1:0]   obuf_rp;    // 쓰기 FSM 이 읽는 버퍼
+  wire  obuf_free  = ~obuf_full[obuf_wp];
+  // 쓰기 완료: 버퍼를 연산 FSM 에 돌려준다 (1 사이클)
+  wire  wr_retire  = (wst == W_DONE);
+
   logic ld_mark;        // 로드 완료: 뱅크를 연산 FSM 에 넘긴다 (1 사이클)
   logic wgt_load_done;  // 가중치 수신의 마지막 비트 (1 사이클)
   logic cm_free;     // 연산 완료: 뱅크를 로드 FSM 에 돌려준다 (1 사이클)
-  logic wr_start;    // 쓰기 FSM 기동 (1 사이클)
 
   // ----------------------------
   // 뱅크 소유권
@@ -609,7 +648,9 @@ logic [32*ACCS-1:0] acc_out_mac_flat;
 // Unpacked views of MAC result and latched outputs for cocotb/FSM access
 logic signed [31:0] acc_out_mac [0:ACCS-1];  // continuous unpack from acc_out_mac_flat
 logic signed [31:0] acc_out_flat [0:ACCS-1]; // latch of mac result (reset-safe, Icarus-safe)
-logic signed [31:0] acc_out_lat  [0:ACCS-1]; // write-out latch
+// 출력 래치. OUT_BUFS 벌을 두고 연산 FSM 과 쓰기 FSM 이 포인터로
+// 주고받는다 (피연산자 SRAM 의 bank_full 핸드오버와 같은 구조).
+logic signed [31:0] acc_buf [0:OUT_BUFS-1][0:ACCS-1];
 
   genvar i;
   generate
@@ -640,7 +681,7 @@ endgenerate
   // 연산 FSM 이 실제로 래치하고 넘어가는 사이클. C_LATCH 에서 쓰기 FSM 을
   // 기다리며 멈춰 있을 수 있으므로 상태만으로는 안 된다.
   // no_wb 면 래치하지 않는다 — 누산기에 남겨 두고 다음 조각이 이어받는다.
-  wire cm_latch = (cst == C_LATCH) && !nw_cm && (wst == W_IDLE);
+  wire cm_latch = (cst == C_LATCH) && !nw_cm && obuf_free;
   // 중간 조각이 통과하는 사이클 (쓰기 없이 완료로 센다).
   wire cm_pass  = (cst == C_LATCH) &&  nw_cm;
 
@@ -663,28 +704,62 @@ generate
   end
 endgenerate
 
-genvar kk;
+genvar kk, kb;
 generate
-  for (kk = 0; kk < ACCS; kk++) begin : GEN_ACC_LAT
-    always_ff @(posedge clk or negedge rst_n) begin
-      // C_CLR 에서 지우지 않는다. 쓰기 FSM 이 분리되면서 다음 디스크립터가
-      // C_CLR 에 도달할 때 아직 전송 중인 acc_out_lat 을 지워버리는
-      // 해저드가 생기기 때문이다. Kt=0 이면 0 을 래치하므로 동작은 같다.
-      if (!rst_n)
-        acc_out_lat[kk] <= 32'sd0;
-      else if (cm_latch)
-        acc_out_lat[kk] <= (Kt_cm != 0) ? acc_out_mac[kk] : 32'sd0;
+  for (kb = 0; kb < OUT_BUFS; kb++) begin : GEN_ACC_BUF
+    for (kk = 0; kk < ACCS; kk++) begin : GEN_ACC_LAT
+      always_ff @(posedge clk or negedge rst_n) begin
+        // C_CLR 에서 지우지 않는다. 쓰기 FSM 이 분리되면서 다음 디스크립터가
+        // C_CLR 에 도달할 때 아직 전송 중인 버퍼를 지워버리는 해저드가
+        // 생기기 때문이다. Kt=0 이면 0 을 래치하므로 동작은 같다.
+        if (!rst_n)
+          acc_buf[kb][kk] <= 32'sd0;
+        else if (cm_latch && (OBUF_W'(kb) == obuf_wp))
+          acc_buf[kb][kk] <= (Kt_cm != 0) ? acc_out_mac[kk] : 32'sd0;
+      end
     end
   end
 endgenerate
 
-  // 쓰기 주소도 래치 시점에 떠 둔다. cm_free 가 같은 에지에 cm_bank 를
-  // 돌리므로 out_cm 은 그 다음 사이클에 이미 다음 뱅크를 가리킨다.
-  logic [63:0] wr_addr_r;
+  // ----------------------------
+  // 출력 래치 소유권 (피연산자 뱅크의 bank_full 과 같은 구조)
+  // ----------------------------
+  //   연산 FSM 이 obuf_wp 에 쓰고 obuf_full 을 세운다.
+  //   쓰기 FSM 이 obuf_rp 를 읽고, 끝나면 obuf_full 을 내린다.
+  // OUT_BUFS=1 이면 wp==rp 이고, 쓰기가 진행 중인 동안 obuf_full 이
+  // 서 있으므로 연산 FSM 이 기다린다 — 이전의 단일 버퍼 동작 그대로다.
   always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n)        wr_addr_r <= 64'd0;
-    else if (cm_latch) wr_addr_r <= out_cm;
+    if (!rst_n) begin
+      obuf_full <= '0;
+      obuf_wp   <= '0;
+      obuf_rp   <= '0;
+    end else begin
+      if (cm_latch) begin
+        obuf_full[obuf_wp] <= 1'b1;
+        obuf_wp <= (obuf_wp == OBUF_W'(OUT_BUFS-1)) ? '0 : obuf_wp + 1'b1;
+      end
+      if (wr_retire) begin
+        obuf_full[obuf_rp] <= 1'b0;
+        obuf_rp <= (obuf_rp == OBUF_W'(OUT_BUFS-1)) ? '0 : obuf_rp + 1'b1;
+      end
+    end
   end
+
+  // 쓰기 주소도 래치 시점에 버퍼마다 떠 둔다. cm_free 가 같은 에지에
+  // cm_bank 를 돌리므로 out_cm 은 그 다음 사이클에 이미 다음 뱅크를
+  // 가리킨다.
+  logic [63:0] wr_addr_q [0:OUT_BUFS-1];
+  genvar ab;
+  generate
+    for (ab = 0; ab < OUT_BUFS; ab++) begin : GEN_WR_ADDR
+      always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+          wr_addr_q[ab] <= 64'd0;
+        else if (cm_latch && (OBUF_W'(ab) == obuf_wp))
+          wr_addr_q[ab] <= out_cm;
+      end
+    end
+  endgenerate
 
   // ----------------------------
   // Compute issue counter
@@ -760,7 +835,7 @@ end
     begin
       pack_beat = '0;
       for (w = 0; w < WPB; w = w + 1)
-        pack_beat[w*32 +: 32] = x32(acc_out_lat[base + w]);
+        pack_beat[w*32 +: 32] = x32(acc_buf[obuf_rp][base + w]);
     end
   endfunction
 
@@ -807,7 +882,8 @@ end
   // ----------------------------
   assign rd_data_ready = 1'b1;
   // 세 FSM 중 하나라도 돌고 있거나, 채워진 뱅크가 남아 있으면 바쁘다.
-  assign busy = (lst != L_IDLE) || (cst != C_IDLE) || (wst != W_IDLE) || (bank_full != '0);
+  assign busy = (lst != L_IDLE) || (cst != C_IDLE) || (wst != W_IDLE)
+             || (bank_full != '0) || (obuf_full != '0);
   // done 은 쓰기가 끝난 시점에 울린다 (결과가 메모리에 실제로 도착한 때).
   // 쓰기가 없는 중간 조각은 연산이 끝난 시점에 울린다. 둘 다 한 사이클
   // 펄스이고 같은 사이클에 겹치지 않는다 (cm_pass 는 nw_cm 일 때만,
@@ -937,7 +1013,6 @@ end
     act_issue   = 1'b0;
     wgt_issue   = 1'b0;
     issue_fire  = 1'b0;
-    wr_start    = 1'b0;
     cm_free     = 1'b0;
     // default raddr = last issued
     rd_k_mux    = rd_k_r;
@@ -979,15 +1054,15 @@ end
       C_LATCH: begin
         if (nw_cm) begin
           // K 분할 중간 조각 — 누산기에 남겨 두고 쓰지 않는다.
-          // acc_out_lat 은 건드리지 않는다 (앞 디스크립터의 쓰기가
-          // 아직 진행 중일 수 있다). 쓰기 FSM 을 기다릴 필요도 없다.
+          // acc_buf 는 건드리지 않는다 (앞 디스크립터의 쓰기가 아직
+          // 진행 중일 수 있다). 쓰기 FSM 을 기다릴 필요도 없다.
           cm_free = 1'b1;
           cst_n   = C_IDLE;
-        end else if (wst == W_IDLE) begin
-          // acc_out_lat 은 단일 버퍼다. 쓰기 FSM 이 비어야 덮어쓸 수 있다.
-          wr_start = 1'b1;
-          cm_free  = 1'b1;    // 뱅크를 로드 FSM 에 돌려준다
-          cst_n    = C_IDLE;
+        end else if (obuf_free) begin
+          // 빈 출력 래치가 있으면 거기 쓰고 넘어간다. 쓰기 FSM 이
+          // 그것을 집어 간다 (OUT_BUFS=1 이면 쓰기가 끝날 때까지 기다린다).
+          cm_free = 1'b1;    // 뱅크를 로드 FSM 에 돌려준다
+          cst_n   = C_IDLE;
         end
       end
 
@@ -1003,14 +1078,15 @@ end
   // ----------------------------
   // 쓰기 FSM (DMA 쓰기 채널)
   // ----------------------------
-  assign wr_req_addr      = wr_addr_r;
+  assign wr_req_addr      = wr_addr_q[obuf_rp];
   assign wr_req_len_bytes = 16'(OUT_BYTES);   // N² × 4, 폭과 무관
 
   always_comb begin
     wst_n        = wst;
     wr_req_valid = 1'b0;      // 이 신호는 쓰기 FSM 이 단독으로 구동한다
     case (wst)
-      W_IDLE: if (wr_start) wst_n = W_REQ;
+      // 쓰기 FSM 은 스스로 기동한다 — 채워진 출력 래치가 있으면 집는다.
+      W_IDLE: if (obuf_full[obuf_rp]) wst_n = W_REQ;
 
       W_REQ: begin
         wr_req_valid = 1'b1;

@@ -5,7 +5,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = [ROOT / "rtl/bf16_pkg.sv",
-       ROOT / "sim/synth/pe_bench.sv", ROOT / "sim/synth/rd_bench.sv"]
+       ROOT / "rtl/mxu_bf16_16x16.sv",
+       ROOT / "sim/synth/pe_bench.sv", ROOT / "sim/synth/rd_bench.sv",
+       ROOT / "sim/synth/tile_bench.sv"]
 
 
 def area(top: str) -> dict:

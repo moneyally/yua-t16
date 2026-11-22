@@ -44,7 +44,7 @@ def u64_le(x): return int(x).to_bytes(8, "little", signed=False)
 
 
 def probe_config(dut):
-    accs = len(dut.u_core.acc_out_lat)
+    accs = len(dut.u_core.acc_out_flat)
     n = int(round(accs ** 0.5))
     assert n * n == accs
     rd_beat = len(dut.rd_data) // 8

@@ -28,7 +28,7 @@ def probe_config(dut):
     1,008/1,024 개가 틀렸고 원인을 찾는 데 시간이 걸렸다. 누산기 배열
     길이와 포트 폭에서 역산하면 그런 불일치가 원천적으로 불가능하다.
     """
-    accs = len(dut.u_core.acc_out_lat)
+    accs = len(dut.u_core.acc_out_flat)
     n = int(round(accs ** 0.5))
     assert n * n == accs, f"누산기 {accs}개가 제곱수가 아니다"
     rd_beat = len(dut.rd_data) // 8
