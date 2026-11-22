@@ -49,6 +49,7 @@ OVERRIDES: dict[str, str] = {
     "test_mxu_core":             "mxu_core",
     "test_mxu_core_d32":         "mxu_core",
     "test_mxu_core_stream":      "mxu_core",
+    "test_mxu_core_lanes":       "mxu_core",
     "test_mxu_deep_layer":       "mxu_core",
     "test_mxu_cluster":          "mxu_cluster",
     "test_mxu_cluster_c4":       "mxu_cluster",
@@ -128,10 +129,15 @@ VARIANTS: dict[str, tuple[str, dict]] = {
                                           "WR_DATA_W": 128}),
     "test_mxu_core_d32":    ("mxu_core", {"DIM": 32, "RD_DATA_W": 512,
                                           "WR_DATA_W": 256}),
-    # 공유 변환기 순차 읽기. 쓰지 않기로 한 경로지만 썩지 않게 돈다
-    # (결과는 같아야 하고, 느린 것만 다르다).
+    # 공유 변환기 순차 읽기, 레인 1개 — 면적 최소 / 가장 느린 기준선.
     "test_mxu_core_stream": ("mxu_core", {"DIM": 16, "RD_DATA_W": 256,
-                                          "WR_DATA_W": 128, "STREAM_RD": 1}),
+                                          "WR_DATA_W": 128, "STREAM_RD": 1,
+                                          "RD_LANES": 1}),
+    # 같은 경로, 레인을 쓰기 폭에 맞춘 구성 (RD_LANES=0 → WPB).
+    # 인덱싱이 레인 1개와 다르므로 둘 다 돌아야 한다.
+    "test_mxu_core_lanes":  ("mxu_core", {"DIM": 16, "RD_DATA_W": 256,
+                                          "WR_DATA_W": 128, "STREAM_RD": 1,
+                                          "RD_LANES": 0}),
     # BF16 경로의 실제 레이어 깊이. 원소가 2바이트라 같은 K 에서 INT8 의
     # 두 배를 읽으므로 요청 쪼개기가 더 일찍 필요하다 (K=4096 이 DIM=16
     # 에서 단계마다 요청 3개로 쪼개진다).

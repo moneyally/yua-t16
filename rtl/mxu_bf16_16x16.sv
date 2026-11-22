@@ -55,7 +55,22 @@ module mxu_bf16_16x16 #(
   //   읽기는 GEMM 타일당 한 번뿐이므로 순차 읽기로 충분하다.
   //   변환기 255개가 사라지는 대신 읽기 먹스 트리가 들어온다.
   parameter int FP32_OUT  = 1,
-  parameter int STREAM_RD = 0
+  parameter int STREAM_RD = 0,
+
+  // 공유 변환기를 몇 개 둘지 (STREAM_RD=1 일 때만 의미가 있다).
+  //
+  // 1 이면 타일 전체가 변환기 하나를 공유한다. 면적은 가장 작지만
+  // 사이클당 누산기 하나밖에 못 읽어 쓰기가 ACCS 사이클이 된다
+  // (측정: 처리량 5.5~16.3배 손실).
+  //
+  // RD_LANES 개를 두면 **한 사이클에 그만큼** 읽는다. 출력이 행
+  // 우선이라 DMA 비트 하나에 들어가는 WPB 개는 같은 행의 연속된
+  // 열이고 그건 같은 타일 안에 있으므로, RD_LANES = WPB 면 비트
+  // 하나를 한 사이클에 채운다.
+  //
+  // COLS 를 나누는 2의 거듭제곱이어야 한다. `rd_idx` 의 하위
+  // log2(RD_LANES) 비트는 무시된다 (레인 0 이 그 그룹의 첫 열이다).
+  parameter int RD_LANES  = 1
 )(
   input  logic        clk,
   input  logic        rst_n,
@@ -74,7 +89,7 @@ module mxu_bf16_16x16 #(
 
   // 공유 변환기 순차 읽기 (STREAM_RD=1 일 때만 유효)
   input  logic [$clog2(ROWS*COLS)-1:0] rd_idx,
-  output logic [31:0]                  rd_fp32,
+  output logic [RD_LANES*32-1:0]       rd_fp32,
 
   // Status
   output logic        busy
@@ -89,7 +104,7 @@ module mxu_bf16_16x16 #(
   // 누산기는 모듈 레벨에 둔다. 공유 변환기가 인덱스로 고를 수 있어야 한다.
   logic signed [bf16_pkg::ACC_W-1:0] acc_fxp [0:ROWS-1][0:COLS-1];
 
-  genvar r, c;
+  genvar r, c, ln;
   generate
     for (r = 0; r < ROWS; r = r + 1) begin : GEN_ROW
       for (c = 0; c < COLS; c = c + 1) begin : GEN_COL
@@ -109,6 +124,17 @@ module mxu_bf16_16x16 #(
       end
     end
   endgenerate
+
+  initial begin
+    if (STREAM_RD != 0) begin
+      if (RD_LANES < 1 || (COLS % RD_LANES) != 0)
+        $fatal(1, "mxu_bf16_16x16: RD_LANES(%0d) 가 COLS(%0d) 를 나누지 않는다",
+               RD_LANES, COLS);
+      if ((RD_LANES & (RD_LANES - 1)) != 0)
+        $fatal(1, "mxu_bf16_16x16: RD_LANES(%0d) 가 2의 거듭제곱이 아니다",
+               RD_LANES);
+    end
+  end
 
   // ─── 출력 경로 ────────────────────────────────────────────────
   generate
@@ -131,14 +157,23 @@ module mxu_bf16_16x16 #(
 
   generate
     if (STREAM_RD != 0) begin : G_SHARED_CONV
-      // 타일 전체가 변환기 하나를 공유한다.
+      // 변환기 RD_LANES 개를 타일이 공유한다. 한 사이클에 같은 행의
+      // 연속된 RD_LANES 열을 변환한다.
       localparam int RW = $clog2(ROWS);
       localparam int CW = $clog2(COLS);
-      logic signed [bf16_pkg::ACC_W-1:0] rd_sel;
-      assign rd_sel  = acc_fxp[rd_idx[RW+CW-1:CW]][rd_idx[CW-1:0]];
-      assign rd_fp32 = bf16_pkg::fxp_to_fp32(rd_sel);
+      // 열 인덱스를 RD_LANES 경계로 내림한다. 그래야 먹스가 열
+      // 그룹(COLS/RD_LANES 개)만 고르면 되고, 정렬이 안 맞은 인덱스가
+      // 와도 조용히 틀리는 대신 그 그룹의 처음부터 읽는다.
+      wire [RW-1:0] rd_r = rd_idx[RW+CW-1:CW];
+      wire [CW-1:0] rd_c = rd_idx[CW-1:0] & ~(CW'(RD_LANES-1));
+
+      for (ln = 0; ln < RD_LANES; ln = ln + 1) begin : G_LANE
+        logic signed [bf16_pkg::ACC_W-1:0] lane_sel;
+        assign lane_sel = acc_fxp[rd_r][rd_c + CW'(ln)];
+        assign rd_fp32[32*ln +: 32] = bf16_pkg::fxp_to_fp32(lane_sel);
+      end
     end else begin : G_NO_STREAM
-      assign rd_fp32 = 32'd0;
+      assign rd_fp32 = '0;
     end
   endgenerate
 

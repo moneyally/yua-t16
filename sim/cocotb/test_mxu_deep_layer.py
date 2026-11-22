@@ -135,3 +135,88 @@ async def test_weight_reuse_survives_deep_k(dut):
     assert reads[1] == reads[2], "재사용 비트 수가 디스크립터마다 다르다"
     dut._log.info(f"  → 깊은 K(={Kt}) 에서도 재사용이 읽기를 "
                   f"{reads[0]} → {reads[1]} 비트로 줄인다")
+
+
+@cocotb.test()
+async def test_deep_throughput(dut):
+    """깊은 K 에서의 정상상태 처리량.
+
+    `test_mxu_core` 의 처리량 측정은 Kt 를 균형점(DIM²·4/WR_BEAT) 으로
+    잡는다. 거기서는 쓰기가 연산과 맞먹으므로 쓰기 쪽 설계 선택이
+    그대로 주기에 드러난다.
+
+    실제 LLM 레이어는 그 반대다 — K 가 수천이고 출력 타일은 그대로이니
+    **연산이 쓰기를 압도한다.** 그 조건에서의 숫자를 따로 가진다.
+    `STREAM_RD` 처럼 쓰기 쪽을 바꾸는 선택의 값어치가 여기서 달라진다.
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await boot(dut)
+    DIM, RD_BEAT, WR_BEAT, KSTEP_B, MAX_KT = probe_config(dut)
+    mem = SimpleMem()
+    start_dma(dut, mem, log=False, rd_beat_bytes=RD_BEAT, wr_beat_bytes=WR_BEAT)
+    rng = np.random.default_rng(779)
+
+    Kt = MAX_KT
+    out_beats = (DIM * DIM * 4) // WR_BEAT
+    A_bf, B_bf, exp = make_operands(rng, DIM, Kt)
+    act, wgt = 0x1000, 0x400000
+    out0 = 0x800000
+    write_operands(mem, act, wgt, A_bf, B_bf, Kt, DIM)
+
+    n_ops = 6
+    issued = done_seen = total = 0
+    started = False
+    done_at = []
+
+    for _ in range(40_000_000):
+        want = issued < n_ops
+        dut.act_addr.value = act
+        dut.wgt_addr.value = wgt
+        dut.out_addr.value = out0 + 0x10000 * issued
+        dut.Kt.value = Kt
+        dut.wgt_keep.value = 1 if issued > 0 else 0
+        dut.cmd_valid.value = 1 if want else 0
+
+        await Timer(1, unit="ns")
+        accept = want and int(dut.cmd_ready.value) == 1
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ns")
+
+        if accept:
+            issued += 1
+            started = True
+        if started:
+            total += 1
+            if int(dut.done.value) == 1:
+                done_seen += 1
+                done_at.append(total)
+                if done_seen == n_ops:
+                    break
+
+    dut.cmd_valid.value = 0
+    assert done_seen == n_ops, f"{done_seen}/{n_ops} 완료"
+
+    bound = Kt * ACC_LSB
+    for n in (0, n_ops - 1):
+        got = read_result(mem, out0 + 0x10000 * n, DIM)
+        err = np.abs(got - exp).max()
+        assert err <= bound, f"스트림 #{n}: 오차 {err:.3e} > {bound:.3e}"
+
+    gaps = [b - a for a, b in zip(done_at, done_at[1:])]
+    steady = gaps[1:] if len(gaps) > 2 else gaps
+    per_op = sum(steady) / len(steady)
+    macs = DIM * DIM * Kt
+
+    dut._log.info("")
+    dut._log.info(f"  DIM={DIM} Kt={Kt}  MAC/디스크립터 {macs:,}  "
+                  f"출력 {out_beats} 비트")
+    dut._log.info(f"  정상상태 {min(steady)}~{max(steady)}, "
+                  f"평균 {per_op:.1f} 사이클/op")
+    dut._log.info(f"  → {macs/per_op:,.0f} MAC/사이클")
+    dut._log.info(f"  → 배열 가동률 {macs/per_op/(DIM*DIM)*100:.1f}%")
+    dut._log.info(f"  연산 {Kt} 사이클분 vs 쓰기 {out_beats} 비트 "
+                  f"→ 연산이 {Kt/out_beats:.0f}배 크다")
+
+    # 연산이 쓰기를 압도하는 구성이므로 가동률이 높아야 한다.
+    assert macs / per_op / (DIM * DIM) > 0.90, \
+        f"가동률 {macs/per_op/(DIM*DIM):.1%} — 깊은 K 에서는 90% 를 넘어야 한다"

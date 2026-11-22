@@ -47,7 +47,13 @@ module mxu_bf16_128x128 #(
   //   하나를 공유해 rd_idx/rd_fp32 로 순차로 읽는다.
   //   PAR=8 기준 변환기가 16,384개에서 64개로 줄어든다.
   parameter int FP32_OUT  = 1,
-  parameter int STREAM_RD = 0
+  parameter int STREAM_RD = 0,
+
+  // 타일당 공유 변환기 수. 자세한 설명은 mxu_bf16_16x16.sv 에 있다.
+  // RD_LANES 개를 두면 한 사이클에 같은 행의 연속된 RD_LANES 열을
+  // 읽는다. DMA 비트 폭에 맞추면(RD_LANES = WPB) 비트 하나를 한
+  // 사이클에 채운다.
+  parameter int RD_LANES  = 1
 )(
   input  logic        clk,
   input  logic        rst_n,
@@ -73,7 +79,7 @@ module mxu_bf16_128x128 #(
   // 공유 변환기 순차 읽기 (STREAM_RD=1 일 때만 유효)
   // rd_idx 는 행 우선 평탄 인덱스다: idx = row * DIM + col
   input  logic [$clog2(DIM*DIM)-1:0] rd_idx,
-  output logic [31:0]                rd_fp32
+  output logic [RD_LANES*32-1:0]     rd_fp32
 );
 
   import bf16_pkg::fp32_add;
@@ -124,7 +130,7 @@ module mxu_bf16_128x128 #(
   localparam int HALF  = TD_W + TIL_W;       // 행/열 한 쪽 폭
 
   logic [TD_W*2-1:0] tile_rd_idx;                      // 모든 타일에 같은 값
-  logic [31:0]       tile_rd_fp32 [0:PAR-1][0:PAR-1];
+  logic [RD_LANES*32-1:0] tile_rd_fp32 [0:PAR-1][0:PAR-1];
 
   logic [TIL_W-1:0] rd_tile_r, rd_tile_c;
   logic [TD_W-1:0]  rd_in_r,   rd_in_c;
@@ -178,7 +184,8 @@ module mxu_bf16_128x128 #(
           .ROWS      (TILE_DIM),
           .COLS      (TILE_DIM),
           .FP32_OUT  (FP32_OUT),
-          .STREAM_RD (STREAM_RD)
+          .STREAM_RD (STREAM_RD),
+          .RD_LANES  (RD_LANES)
         ) u_tile (
           .clk     (clk),
           .rst_n   (rst_n),
@@ -419,7 +426,7 @@ module mxu_bf16_128x128 #(
     if (STREAM_RD != 0) begin : G_RD_MUX
       assign rd_fp32 = tile_rd_fp32[rd_tile_r][rd_tile_c];
     end else begin : G_RD_TIE
-      assign rd_fp32 = 32'd0;
+      assign rd_fp32 = '0;
     end
   endgenerate
 

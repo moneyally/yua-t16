@@ -89,17 +89,28 @@ module mxu_core #(
   // 래치를 두면 2) 는 없어지지만 ACCS×32 비트 플롭이 생겨 변환기로
   // 아낀 것을 되돌려준다. 그래서 래치를 두지 않았다 (`LAT_N`).
   //
-  // ── 측정이 가리키는 대안 ─────────────────────────────────────────
+  // ── 측정이 가리킨 대안 → `RD_LANES` 로 구현했다 ──────────────────
   //
-  // 문제는 "공유" 가 아니라 "하나" 다. 타일당 변환기를 **WPB 개** 두면
-  // 비트 하나를 한 사이클에 채운다 (같은 타일의 인접한 WPB 열이므로
-  // 가능하다). 그러면 사이클 손실이 0 이고 변환기는 PE 당 하나에서
-  // 타일당 WPB 개로 줄어든다 — WR=512 면 타일당 16 개, 256 개 중
-  // 93.75% 절감이다. 아직 구현하지 않았다.
+  // 문제는 "공유" 가 아니라 "하나" 였다. 타일당 변환기를 **WPB 개**
+  // 두면 비트 하나를 한 사이클에 채운다 (같은 타일의 인접한 WPB
+  // 열이므로 가능하다). `RD_LANES` 가 그것이다.
   //
   // 파라미터를 남긴 것은 비용이 0 (기본 0 에서 경로가 elaborate 되지
   // 않는다) 이고, 대안 설계점의 기준선이 되기 때문이다.
-  parameter int STREAM_RD = 0
+  parameter int STREAM_RD = 0,
+
+  // 타일마다 둘 공유 변환기 수 (`STREAM_RD=1` 일 때만 쓰인다).
+  //
+  //   0 (기본): 쓰기 비트 폭에 맞춘다 (WPB = WR_DATA_W/32). 비트
+  //             하나를 한 사이클에 채우므로 비트당 사이클 손실이 0 이다.
+  //   1       : 타일당 하나. 가장 작고 가장 느리다 (위 측정값).
+  //   그 사이 : WPB 를 나누는 2의 거듭제곱.
+  //
+  // 겹치기 상실은 이것으로 해결되지 않는다. 누산기를 타일에 둔 채
+  // 읽으므로 읽는 동안 다음 디스크립터를 시작할 수 없다 (`rd_hold`).
+  // 그래서 주기가 max(연산, 쓰기) 가 아니라 합이고, 그 비용은
+  // OUT_BEATS 만큼이다 — 비트당 손실과는 별개다.
+  parameter int RD_LANES = 0
 )(
   input  logic clk,
   input  logic rst_n,
@@ -158,7 +169,12 @@ module mxu_core #(
   localparam int OUT_BYTES = ACCS * 4;
   localparam int BEAT_W   = $clog2(OUT_BEATS + 1);
   localparam int RDP_W    = $clog2(ACCS + 1);       // 순차 읽기 포인터
-  localparam int GTH_W    = (WPB > 1) ? $clog2(WPB) : 1;
+  // 실제 레인 수. 0 은 "쓰기 비트 폭에 맞춘다" 는 뜻이다.
+  localparam int RDL      = (STREAM_RD == 0) ? 1
+                          : (RD_LANES == 0)  ? WPB : RD_LANES;
+  // 비트 하나를 채우는 데 걸리는 사이클.
+  localparam int GSTEPS   = WPB / RDL;
+  localparam int GS_W     = (GSTEPS > 1) ? $clog2(GSTEPS) : 1;
   localparam int WR_BEAT_B = WR_DATA_W / 8;
   localparam int RD_BEAT_B = RD_DATA_W / 8;
 
@@ -185,6 +201,9 @@ module mxu_core #(
              RD_DATA_W, KSTEP_W);
     if (WR_DATA_W != 128 && WR_DATA_W != 256 && WR_DATA_W != 512)
       $fatal(1, "mxu_core: WR_DATA_W must be 128, 256 or 512 (got %0d)", WR_DATA_W);
+    if (STREAM_RD != 0 && (WPB % RDL) != 0)
+      $fatal(1, "mxu_core: RD_LANES(%0d) 가 WPB(%0d) 를 나누지 않는다",
+             RDL, WPB);
     if (OUT_BEATS * WPB != ACCS)
       $fatal(1, "mxu_core: DIM^2 (%0d) must be a multiple of WR_DATA_W/32 (%0d)",
              ACCS, WPB);
@@ -418,7 +437,7 @@ module mxu_core #(
   logic        mxu_busy, mxu_done, mxu_ready;
   logic [31:0] acc_flat [0:ACCS-1];
   logic [$clog2(ACCS)-1:0] mxu_rd_idx;
-  logic [31:0]             mxu_rd_fp32;
+  logic [RDL*32-1:0]       mxu_rd_fp32;
 
   genvar li;
   generate
@@ -430,7 +449,8 @@ module mxu_core #(
 
   mxu_bf16_128x128 #(
     .DIM(DIM), .TILE_DIM(16), .TILES(DIM/16), .PAR(DIM/16),
-    .FP32_OUT((STREAM_RD != 0) ? 0 : 1), .STREAM_RD(STREAM_RD)
+    .FP32_OUT((STREAM_RD != 0) ? 0 : 1), .STREAM_RD(STREAM_RD),
+    .RD_LANES(RDL)
   ) u_mxu (
     .clk(clk), .rst_n(rst_n),
     .start(mxu_start), .acc_clr(mxu_acc_clr), .k_steps(16'(Kt_cm)),
@@ -447,10 +467,15 @@ module mxu_core #(
   // 비트 하나를 모으는 데 WPB 사이클이 걸린다. 행 우선 출력이라 한 비트의
   // WPB 개는 같은 행의 연속된 열이고, 그건 같은 타일 안에 있다 — 타일을
   // 병렬로 읽어도 한 비트를 더 빨리 채울 수 없다.
-  logic [RDP_W-1:0] rd_ptr;        // 다음에 읽을 누산기
-  logic [GTH_W-1:0] gth_slot;      // 비트 안에서 채울 위치
+  logic [RDP_W-1:0] rd_ptr;        // 다음에 읽을 누산기 (레인 0)
+  logic [GS_W-1:0]  gstep;         // 비트 안에서 몇 번째 묶음인가
   logic [WR_DATA_W-1:0] gather;    // 모으는 중인 비트
-  wire  gth_last = (gth_slot == GTH_W'(WPB-1));
+  wire  gth_last = (gstep == GS_W'(GSTEPS-1));
+
+  // 이번 사이클에 들어오는 RDL 개 워드 (X 는 0 으로 클립).
+  logic [RDL*32-1:0] rd_chunk;
+  // 그 묶음을 끼워 넣은 다음 상태. 완성되면 그대로 비트가 된다.
+  logic [WR_DATA_W-1:0] gather_next;
 
   generate
     if (STREAM_RD != 0) begin : G_RD_PTR
@@ -527,6 +552,21 @@ module mxu_core #(
   end
 `endif
 
+  // 이번 사이클에 읽힌 RDL 개 워드를 X 클립해 묶는다.
+  genvar gl;
+  generate
+    for (gl = 0; gl < RDL; gl++) begin : G_CHUNK
+      assign rd_chunk[32*gl +: 32] = x32(mxu_rd_fp32[32*gl +: 32]);
+    end
+  endgenerate
+
+  // 묶음을 비트의 gstep 번째 자리에 끼운 결과. gstep 이 마지막이면
+  // 이것이 곧 완성된 비트다 — 연결 연산으로 손으로 자르지 않는다.
+  always_comb begin
+    gather_next = gather;
+    gather_next[32*RDL*gstep +: 32*RDL] = rd_chunk;
+  end
+
   generate
   if (STREAM_RD == 0) begin : G_WR_PARALLEL
     // 래치에서 비트를 통째로 떠낸다. 비트당 1 사이클.
@@ -557,21 +597,23 @@ module mxu_core #(
     end
     always_ff @(posedge clk or negedge rst_n) begin
       if (!rst_n) begin
-        rd_ptr   <= '0;
-        gth_slot <= '0;
-        gather   <= '0;
+        rd_ptr <= '0;
+        gstep  <= '0;
+        gather <= '0;
       end
     end
   end else begin : G_WR_STREAM
-    // 공유 변환기에서 사이클당 하나를 받아 비트를 모은다. 비트당 WPB
-    // 사이클. 비트가 차면 들고 있다가 wr_data_ready 를 기다린다.
+    // 공유 변환기에서 사이클당 RDL 개를 받아 비트를 모은다. 비트
+    // 하나에 GSTEPS = WPB/RDL 사이클이 걸린다. RDL == WPB 면
+    // GSTEPS == 1 이라 **한 사이클에 비트가 완성된다** — 그때는
+    // FP32_OUT=1 과 비트당 비용이 같다.
     always_ff @(posedge clk or negedge rst_n) begin
       if (!rst_n) begin
         out_beat   <= '0;
         wr_data_r  <= '0;
         wr_valid_r <= 1'b0;
         rd_ptr     <= '0;
-        gth_slot   <= '0;
+        gstep      <= '0;
         gather     <= '0;
       end else if (wst == W_REQ) begin
         // 요청이 수락되기 전부터 첫 비트를 모아 둔다. rd_ptr 은
@@ -579,43 +621,53 @@ module mxu_core #(
         out_beat   <= '0;
         wr_valid_r <= 1'b0;
         if (rd_ptr < RDP_W'(WPB)) begin
-          gather[gth_slot*32 +: 32] <= x32(mxu_rd_fp32);
-          rd_ptr   <= rd_ptr + 1'b1;
-          gth_slot <= gth_last ? '0 : gth_slot + 1'b1;
+          gather <= gather_next;
+          rd_ptr <= rd_ptr + RDP_W'(RDL);
+          gstep  <= gth_last ? '0 : gstep + 1'b1;
           if (gth_last) begin
-            wr_data_r  <= {x32(mxu_rd_fp32),
-                           gather[WR_DATA_W-33:0]};
+            wr_data_r  <= gather_next;
             wr_valid_r <= 1'b1;
           end
         end else begin
           wr_valid_r <= 1'b1;   // 첫 비트는 이미 다 모았다
         end
       end else if (wst == W_SEND) begin
-        if (wr_valid_r) begin
-          // 들고 있는 비트를 내보내는 중 — 수락될 때까지 읽지 않는다.
-          if (wr_data_ready) begin
-            if (out_beat == OUT_BEATS-1) begin
-              wr_valid_r <= 1'b0;
+        if (wr_valid_r && wr_data_ready) begin
+          if (out_beat == OUT_BEATS-1) begin
+            wr_valid_r <= 1'b0;
+          end else begin
+            out_beat <= out_beat + 1'b1;
+            if (GSTEPS == 1) begin
+              // 비트가 한 사이클에 완성되는 구성이면, 수락되는 **그
+              // 사이클에** 다음 비트를 집는다. rd_ptr 이 이미 다음
+              // 묶음을 가리키고 변환기 출력은 조합이므로 가능하다.
+              //
+              // 이걸 안 하면 비트마다 valid 를 한 사이클 내려 모으는
+              // 셈이 되어 **비트당 2 사이클**이 된다. 처음에 그렇게
+              // 썼고, DIM=16/WR=128 에서 200 사이클/op 이 나왔다.
+              gather     <= gather_next;
+              wr_data_r  <= gather_next;
+              rd_ptr     <= rd_ptr + RDP_W'(RDL);
+              wr_valid_r <= 1'b1;
             end else begin
-              out_beat   <= out_beat + 1'b1;
               wr_valid_r <= 1'b0;   // 다음 비트를 모으는 동안 내린다
             end
           end
-        end else begin
-          // 다음 비트를 모은다: 사이클당 하나.
-          gather[gth_slot*32 +: 32] <= x32(mxu_rd_fp32);
-          rd_ptr   <= rd_ptr + 1'b1;
-          gth_slot <= gth_last ? '0 : gth_slot + 1'b1;
+        end else if (!wr_valid_r) begin
+          // 다음 비트를 모은다: 사이클당 RDL 개.
+          gather <= gather_next;
+          rd_ptr <= rd_ptr + RDP_W'(RDL);
+          gstep  <= gth_last ? '0 : gstep + 1'b1;
           if (gth_last) begin
-            wr_data_r  <= {x32(mxu_rd_fp32), gather[WR_DATA_W-33:0]};
+            wr_data_r  <= gather_next;
             wr_valid_r <= 1'b1;
           end
         end
       end else begin
         wr_valid_r <= 1'b0;
         if (wst == W_DONE) begin
-          rd_ptr   <= '0;
-          gth_slot <= '0;
+          rd_ptr <= '0;
+          gstep  <= '0;
         end
       end
     end
