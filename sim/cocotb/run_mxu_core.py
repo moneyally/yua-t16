@@ -13,13 +13,16 @@ W  = int(os.environ.get("RD_DATA_W", "256"))
 WW = int(os.environ.get("WR_DATA_W", "128"))
 MK = int(os.environ.get("MAX_KT", "256"))
 SR = int(os.environ.get("STREAM_RD", "0"))
+RL = int(os.environ.get("RD_LANES", "0"))
+AB = int(os.environ.get("ACC_BUFS", "1"))
 TM = os.environ.get("TEST_MODULE", "test_mxu_core")
 r.build(sources=deps("mxu_core"), hdl_toplevel="mxu_core",
         parameters={"DIM": D, "RD_DATA_W": W, "WR_DATA_W": WW, "MAX_KT": MK,
-                    "STREAM_RD": SR},
+                    "STREAM_RD": SR, "RD_LANES": RL,
+                    "ACC_BUFS": AB},
         build_args=["--timing","-Wno-fatal","--public-flat-rw",
                     "-Wno-WIDTHEXPAND","-Wno-TIMESCALEMOD","--unroll-count","65536"],
-        build_dir=ROOT/"sim_build"/"build"/f"mxu_core_D{D}_W{W}_WW{WW}_K{MK}_SR{SR}", always=False)
+        build_dir=ROOT/"sim_build"/"build"/f"mxu_core_D{D}_W{W}_WW{WW}_K{MK}_SR{SR}_RL{RL}_AB{AB}", always=False)
 sys.path.insert(0, str(ROOT/"sim/cocotb"))
 res = ROOT/"sim_build"/"results"; res.mkdir(parents=True, exist_ok=True)
 r.test(hdl_toplevel="mxu_core", test_module=TM, results_xml=str(res/f"{TM}.xml"))

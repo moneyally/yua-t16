@@ -38,7 +38,11 @@ async def log_core_signals(dut, cycles=200):
             return f"0x{int(sig.value):032x}"
 
         acc_flat0 = dut.u_core.acc_out_flat[0].value.binstr
-        acc_lat0  = dut.u_core.acc_buf[0][0].value.binstr
+        # acc_buf 는 버퍼마다 **packed** 벡터다 (쓰기 데이터를 부분선택
+        # 하나로 뽑아야 Yosys 가 합성한다 — 예전의 pack_beat 함수는
+        # 함수 안에서 배열을 신호 인덱스로 읽어 합성이 막혔다).
+        # 그래서 [0][0] 은 비트 하나다. 워드 0 은 하위 32비트다.
+        acc_lat0  = dut.u_core.acc_buf[0].value.binstr[-32:]
 
         mac_en = int(dut.u_core.mac_en.value)
         act_re = int(dut.u_core.act_re.value)

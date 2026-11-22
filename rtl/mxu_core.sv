@@ -110,7 +110,21 @@ module mxu_core #(
   // 읽으므로 읽는 동안 다음 디스크립터를 시작할 수 없다 (`rd_hold`).
   // 그래서 주기가 max(연산, 쓰기) 가 아니라 합이고, 그 비용은
   // OUT_BEATS 만큼이다 — 비트당 손실과는 별개다.
-  parameter int RD_LANES = 0
+  parameter int RD_LANES = 0,
+
+  // 누산기 뱅크 수 (`STREAM_RD=1` 일 때만 쓰인다).
+  //
+  // 1 이면 누산기를 타일에 둔 채로 읽는다. 읽는 동안 다음 디스크립터가
+  // `acc_clr` 을 세울 수 없으므로(`rd_hold`) 연산과 쓰기가 겹치지
+  // 못하고, 주기가 max(연산, 쓰기) 가 아니라 합이 된다. 그 비용은
+  // 디스크립터당 OUT_BEATS 사이클이다 — Kt=64 에서 93%, Kt=4096 에서
+  // 1.6% 다.
+  //
+  // 2 면 타일 안에서 누산기를 핑퐁한다. `C_LATCH` 에서 `snap` 을 한
+  // 사이클 쳐서 방금 끝난 뱅크를 읽기 쪽으로 넘기고, 연산은 반대쪽
+  // 뱅크에서 바로 다음 디스크립터를 시작한다. `rd_hold` 가 사라진다.
+  // 비용은 타일당 누산기 한 벌의 플롭 (DIM² × ACC_W / 타일 수).
+  parameter int ACC_BUFS = 1
 )(
   input  logic clk,
   input  logic rst_n,
@@ -175,6 +189,9 @@ module mxu_core #(
   // 비트 하나를 채우는 데 걸리는 사이클.
   localparam int GSTEPS   = WPB / RDL;
   localparam int GS_W     = (GSTEPS > 1) ? $clog2(GSTEPS) : 1;
+  // 실제 뱅크 수. FP32_OUT 경로는 acc_lat 으로 이미 겹치기를 얻으므로
+  // 핑퐁이 필요 없고, 타일이 FP32_OUT + 핑퐁 조합을 금지한다.
+  localparam int ABUF     = (STREAM_RD == 0) ? 1 : ACC_BUFS;
   localparam int WR_BEAT_B = WR_DATA_W / 8;
   localparam int RD_BEAT_B = RD_DATA_W / 8;
 
@@ -201,6 +218,10 @@ module mxu_core #(
              RD_DATA_W, KSTEP_W);
     if (WR_DATA_W != 128 && WR_DATA_W != 256 && WR_DATA_W != 512)
       $fatal(1, "mxu_core: WR_DATA_W must be 128, 256 or 512 (got %0d)", WR_DATA_W);
+    if (ACC_BUFS != 1 && ACC_BUFS != 2)
+      $fatal(1, "mxu_core: ACC_BUFS(%0d) 는 1 또는 2 여야 한다", ACC_BUFS);
+    if (ACC_BUFS > 1 && STREAM_RD == 0)
+      $fatal(1, "mxu_core: ACC_BUFS>1 은 STREAM_RD=1 에서만 의미가 있다 (FP32_OUT 은 acc_lat 을 쓴다)");
     if (STREAM_RD != 0 && (WPB % RDL) != 0)
       $fatal(1, "mxu_core: RD_LANES(%0d) 가 WPB(%0d) 를 나누지 않는다",
              RDL, WPB);
@@ -221,13 +242,13 @@ module mxu_core #(
     bank_addr = SADDR_W'(b) * SADDR_W'(BANK_DEPTH) + SADDR_W'(idx);
   endfunction
 
-  function automatic logic [31:0] clamp_kt(input logic [31:0] in);
-    logic [31:0] mx;
-    begin
-      mx = MAX_KT;
-      clamp_kt = (in > mx) ? mx : in;
-    end
-  endfunction
+  // Kt 를 MAX_KT 로 자른 값. 전에는 함수였다.
+  //
+  // 함수 안의 지역 변수를 비동기 리셋이 있는 always_ff 에서 부르면
+  // Yosys 가 그 지역 변수에 레지스터를 만들려 하고 "Multiple edge
+  // sensitive events found for this signal" 로 멈춘다. 순수 식이므로
+  // wire 하나로 두면 끝이고, 그래야 합성된다.
+  wire [31:0] kt_clamped = (Kt > 32'(MAX_KT)) ? 32'(MAX_KT) : Kt;
 
   // ----------------------------
   // FSM
@@ -298,9 +319,9 @@ module mxu_core #(
       act_base_r <= act_addr;
       wgt_base_r <= wgt_addr;
       // 읽기 길이는 워드 단위로 올림한다 (남는 부분은 쓰이지 않는다).
-      rd_len_r   <= LEN_W'(((clamp_kt(Kt) + KPW - 1) / KPW) * RD_BEAT_B);
-      wgt_len_r  <= LEN_W'(((clamp_kt(Kt) + KPW - 1) / KPW) * RD_BEAT_B);
-      Kt_bank[ld_bank]  <= clamp_kt(Kt);
+      rd_len_r   <= LEN_W'(((kt_clamped + KPW - 1) / KPW) * RD_BEAT_B);
+      wgt_len_r  <= LEN_W'(((kt_clamped + KPW - 1) / KPW) * RD_BEAT_B);
+      Kt_bank[ld_bank]  <= kt_clamped;
       out_bank[ld_bank] <= out_addr;
     end
   end
@@ -450,13 +471,14 @@ module mxu_core #(
   mxu_bf16_128x128 #(
     .DIM(DIM), .TILE_DIM(16), .TILES(DIM/16), .PAR(DIM/16),
     .FP32_OUT((STREAM_RD != 0) ? 0 : 1), .STREAM_RD(STREAM_RD),
-    .RD_LANES(RDL)
+    .RD_LANES(RDL), .ACC_BUFS(ABUF)
   ) u_mxu (
     .clk(clk), .rst_n(rst_n),
     .start(mxu_start), .acc_clr(mxu_acc_clr), .k_steps(16'(Kt_cm)),
     .a_col(a_col), .b_row(b_row), .data_valid(mxu_data_valid),
     .busy(mxu_busy), .done_pulse(mxu_done), .ready(mxu_ready),
     .acc_flat(acc_flat),
+    .snap(cm_latch),
     .rd_idx(mxu_rd_idx), .rd_fp32(mxu_rd_fp32)
   );
 
@@ -499,7 +521,9 @@ module mxu_core #(
   wire cm_latch = (cst == C_LATCH) && (wst == W_IDLE);
 
   // STREAM_RD=1 에서 읽기가 진행 중인 동안 연산 FSM 을 세우는 신호.
-  wire rd_hold = (STREAM_RD != 0) && (wst != W_IDLE);
+  // 누산기를 핑퐁하면(ABUF=2) 읽히는 뱅크와 누산되는 뱅크가 다르므로
+  // 세울 필요가 없다 — 그게 OUT_BEATS 사이클을 돌려받는 길이다.
+  wire rd_hold = (STREAM_RD != 0) && (ABUF == 1) && (wst != W_IDLE);
 
   genvar ai;
   generate
@@ -528,10 +552,19 @@ module mxu_core #(
   logic [WR_DATA_W-1:0] wr_data_r;
   logic                 wr_valid_r;
 
+  // 시뮬레이션에서 X 를 0 으로 클립한다. 하드웨어에는 X 가 없으므로
+  // 합성에서는 그냥 통과다 — `===` 는 합성 구문이 아니고, 이 함수가
+  // 데이터패스 안에 있어서 **`mxu_core` 전체가 합성되지 않았다**
+  // ("Non-constant function call in constant expression"). 그래서
+  // 이 설계의 클럭 주파수를 한 번도 측정할 수 없었다.
   function automatic logic [31:0] x32(input logic [31:0] v);
     begin
+`ifdef COCOTB_SIM
       if ((^v === 1'bx)) x32 = 32'd0;
       else               x32 = v;
+`else
+      x32 = v;
+`endif
     end
   endfunction
 
@@ -769,7 +802,7 @@ module mxu_core #(
       lst <= lst_n;
 
       if (lst == L_IDLE && cmd_accept) begin
-        rd_left     <= LEN_W'(((clamp_kt(Kt) + KPW - 1) / KPW) * RD_BEAT_B);
+        rd_left     <= LEN_W'(((kt_clamped + KPW - 1) / KPW) * RD_BEAT_B);
         rd_cur_addr <= act_addr;
       end else if (lst_n == L_WGT_REQ && lst == L_ACT_RECV) begin
         rd_left     <= wgt_len_r;

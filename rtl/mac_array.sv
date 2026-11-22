@@ -10,14 +10,25 @@
 // 강도가 N 에 비례한다 — 대역폭 대비 연산을 늘리는 정석 경로다.
 // spec/memory-bandwidth-analysis.md 참조.
 module mac_array #(
-  parameter int N = 16
+  parameter int N = 16,
+  // 누산기 캐리 체인 분할. 자세한 설명은 mac_pe.sv 에 있다.
+  // 이 설계의 Fmax 를 정하는 경로이므로 여기서 바꿔 A/B 할 수 있게 둔다.
+  parameter int ACC_SPLIT = 0,
+  // 곱셈기 출력 레지스터. Fmax 의 지배 항목이다 (mac_pe.sv 참고).
+  parameter int MUL_REG = 0
 )(
   input  logic clk,
   input  logic rst_n,
   input  logic en,
   input  logic acc_clr,
-  input  logic signed [7:0] a_row [0:N-1],
-  input  logic signed [7:0] b_col [0:N-1],
+  // 평탄화된 피연산자. a_row[8*i +: 8] 가 i 번째 값이다.
+  //
+  // 전에는 unpacked 배열 포트였다. Yosys 가 그 선언을 파싱하지 못해
+  // (`mxu_bf16_16x16` 과 같은 한계) **`gemm_core` 를 합성할 수 없었다.**
+  // 그래서 이 설계의 클럭 주파수가 한 번도 측정되지 않았고, 모든
+  // 처리량 수치(MAC/사이클) 를 TOPS 로 바꿀 수 없었다.
+  input  logic [N*8-1:0] a_row,
+  input  logic [N*8-1:0] b_col,
   // Packed flat output: acc_out_flat[IDX*32 +: 32] = result for
   // row=IDX/N, col=IDX%N.
   // Exported as a packed vector to work around the Icarus 12
@@ -32,13 +43,13 @@ module mac_array #(
         localparam int IDX = (i * N) + j;
         localparam int LSB = IDX * 32;
 
-        mac_pe u_pe (
+        mac_pe #(.ACC_SPLIT(ACC_SPLIT), .MUL_REG(MUL_REG)) u_pe (
           .clk     (clk),
           .rst_n   (rst_n),
           .en      (en),
           .acc_clr (acc_clr),
-          .a       (a_row[i]),
-          .b       (b_col[j]),
+          .a       ($signed(a_row[8*i +: 8])),
+          .b       ($signed(b_col[8*j +: 8])),
           .acc     (acc_out_flat[LSB +: 32])
         );
       end

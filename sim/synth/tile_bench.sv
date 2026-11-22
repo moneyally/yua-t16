@@ -36,6 +36,7 @@ module tile_fp32 #(
   mxu_bf16_16x16 #(.ROWS(ROWS), .COLS(COLS),
                    .FP32_OUT(1), .STREAM_RD(0)) u_tile (
     .clk(clk), .rst_n(rst_n), .en(en), .acc_clr(acc_clr),
+    .snap(1'b0),
     .a_row(a_row), .b_col(b_col), .acc_out(acc_out),
     .rd_idx('0), .rd_fp32(rd_unused), .busy(busy));
 endmodule
@@ -43,12 +44,14 @@ endmodule
 module tile_stream #(
   parameter int ROWS = 16,
   parameter int COLS = 16,
-  parameter int LANES = 1
+  parameter int LANES = 1,
+  parameter int BUFS  = 1
 )(
   input  logic clk,
   input  logic rst_n,
   input  logic en,
   input  logic acc_clr,
+  input  logic snap,
   input  logic [ROWS*16-1:0] a_row,
   input  logic [COLS*16-1:0] b_col,
   input  logic [$clog2(ROWS*COLS)-1:0] rd_idx,
@@ -60,40 +63,35 @@ module tile_stream #(
 
   mxu_bf16_16x16 #(.ROWS(ROWS), .COLS(COLS),
                    .FP32_OUT(0), .STREAM_RD(1),
-                   .RD_LANES(LANES)) u_tile (
+                   .RD_LANES(LANES), .ACC_BUFS(BUFS)) u_tile (
     .clk(clk), .rst_n(rst_n), .en(en), .acc_clr(acc_clr),
+    .snap(snap),
     .a_row(a_row), .b_col(b_col), .acc_out(acc_unused),
     .rd_idx(rd_idx), .rd_fp32(rd_fp32), .busy(busy));
 endmodule
 
 // 레인 수를 고정한 top 들. area.py 는 파라미터를 넘기지 않으므로
 // 이름을 따로 둬야 비교할 수 있다.
-module tile_stream4 (
-  input  logic clk, rst_n, en, acc_clr,
-  input  logic [16*16-1:0] a_row,
-  input  logic [16*16-1:0] b_col,
-  input  logic [7:0]       rd_idx,
-  output logic [4*32-1:0]  rd_fp32,
-  output logic busy
-);
-  tile_stream #(.ROWS(16), .COLS(16), .LANES(4)) u (
-    .clk(clk), .rst_n(rst_n), .en(en), .acc_clr(acc_clr),
-    .a_row(a_row), .b_col(b_col), .rd_idx(rd_idx),
-    .rd_fp32(rd_fp32), .busy(busy));
+`define TILE_TOP(NAME, LN, BF)                                  \
+module NAME (                                                    \
+  input  logic clk, rst_n, en, acc_clr, snap,                    \
+  input  logic [16*16-1:0] a_row,                                \
+  input  logic [16*16-1:0] b_col,                                \
+  input  logic [7:0]       rd_idx,                               \
+  output logic [LN*32-1:0] rd_fp32,                              \
+  output logic busy                                              \
+);                                                               \
+  tile_stream #(.ROWS(16), .COLS(16), .LANES(LN), .BUFS(BF)) u ( \
+    .clk(clk), .rst_n(rst_n), .en(en), .acc_clr(acc_clr),        \
+    .snap(snap), .a_row(a_row), .b_col(b_col), .rd_idx(rd_idx),  \
+    .rd_fp32(rd_fp32), .busy(busy));                             \
 endmodule
 
-module tile_stream16 (
-  input  logic clk, rst_n, en, acc_clr,
-  input  logic [16*16-1:0] a_row,
-  input  logic [16*16-1:0] b_col,
-  input  logic [7:0]       rd_idx,
-  output logic [16*32-1:0] rd_fp32,
-  output logic busy
-);
-  tile_stream #(.ROWS(16), .COLS(16), .LANES(16)) u (
-    .clk(clk), .rst_n(rst_n), .en(en), .acc_clr(acc_clr),
-    .a_row(a_row), .b_col(b_col), .rd_idx(rd_idx),
-    .rd_fp32(rd_fp32), .busy(busy));
-endmodule
+// 레인 수 × 뱅크 수. 뱅크 2 는 핑퐁 — 겹치기를 되찾는 대신 누산기
+// 한 벌의 플롭이 더 든다. 그 비용이 얼마인지가 여기서 나온다.
+`TILE_TOP(tile_stream4,     4,  1)
+`TILE_TOP(tile_stream16,   16,  1)
+`TILE_TOP(tile_stream4_pp,  4,  2)
+`TILE_TOP(tile_stream16_pp, 16, 2)
 
 `default_nettype wire

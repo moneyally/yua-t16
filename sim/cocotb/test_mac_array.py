@@ -3,6 +3,14 @@ from cocotb.triggers import RisingEdge
 from cocotb.clock import Clock
 import numpy as np
 
+
+def pack_i8(vals):
+    """8비트 부호있는 값 리스트 → packed 벡터 (낮은 인덱스가 하위 비트)."""
+    v = 0
+    for i, x in enumerate(vals):
+        v |= (int(x) & 0xFF) << (8 * i)
+    return v
+
 @cocotb.test()
 async def test_mac_array_basic(dut):
     # 100MHz
@@ -29,12 +37,12 @@ async def test_mac_array_basic(dut):
         await tick(1)
         dut.acc_clr.value = 0
 
-        # K-loop
+        # K-loop. a_row/b_col 은 평탄화된 packed 벡터다 (Yosys 가
+        # unpacked 배열 포트를 파싱하지 못해 바꿨다 — 그래야
+        # gemm_core 를 합성해 클럭 주파수를 잴 수 있다).
         for k in range(Kt):
-            for i in range(16):
-                dut.a_row[i].value = int(A[i, k])
-            for j in range(16):
-                dut.b_col[j].value = int(B[k, j])
+            dut.a_row.value = pack_i8([int(A[i, k]) for i in range(16)])
+            dut.b_col.value = pack_i8([int(B[k, j]) for j in range(16)])
 
             dut.en.value = 1
             await tick(1)

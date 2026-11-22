@@ -53,7 +53,12 @@ module mxu_bf16_128x128 #(
   // RD_LANES 개를 두면 한 사이클에 같은 행의 연속된 RD_LANES 열을
   // 읽는다. DMA 비트 폭에 맞추면(RD_LANES = WPB) 비트 하나를 한
   // 사이클에 채운다.
-  parameter int RD_LANES  = 1
+  parameter int RD_LANES  = 1,
+
+  // 누산기 뱅크 수. 2 면 핑퐁이고, `snap` 으로 읽기 쪽과 연산 쪽을
+  // 바꾼다 — 읽는 동안 다음 디스크립터가 시작할 수 있다.
+  // 자세한 설명은 mxu_bf16_16x16.sv 에 있다.
+  parameter int ACC_BUFS  = 1
 )(
   input  logic        clk,
   input  logic        rst_n,
@@ -78,6 +83,9 @@ module mxu_bf16_128x128 #(
 
   // 공유 변환기 순차 읽기 (STREAM_RD=1 일 때만 유효)
   // rd_idx 는 행 우선 평탄 인덱스다: idx = row * DIM + col
+  // 누산기 뱅크 교체 (ACC_BUFS=2 일 때만 유효). 모든 타일에 같이 간다.
+  input  logic                       snap,
+
   input  logic [$clog2(DIM*DIM)-1:0] rd_idx,
   output logic [RD_LANES*32-1:0]     rd_fp32
 );
@@ -185,7 +193,8 @@ module mxu_bf16_128x128 #(
           .COLS      (TILE_DIM),
           .FP32_OUT  (FP32_OUT),
           .STREAM_RD (STREAM_RD),
-          .RD_LANES  (RD_LANES)
+          .RD_LANES  (RD_LANES),
+          .ACC_BUFS  (ACC_BUFS)
         ) u_tile (
           .clk     (clk),
           .rst_n   (rst_n),
@@ -194,6 +203,7 @@ module mxu_bf16_128x128 #(
           .a_row   (a_s),
           .b_col   (b_s),
           .acc_out (o),
+          .snap    (snap),
           .rd_idx  (tile_rd_idx),
           .rd_fp32 (tile_rd_fp32[gr][gc]),
           .busy    ()

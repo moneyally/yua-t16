@@ -124,7 +124,25 @@ module gemm_core #(
   // 파라미터를 남긴 것은 비용이 0 이고(기본 1 에서 플롭이 늘지 않는다)
   // 구성이 바뀌었을 때 같은 A/B 를 다시 돌릴 수 있기 때문이다.
   // 2 의 비용은 누산기 한 벌의 플롭 — N=64 에서 256 Kb 다.
-  parameter int OUT_BUFS = 1
+  parameter int OUT_BUFS = 1,
+
+  // 누산기 캐리 체인 분할 (mac_pe.sv 참고). 이 설계의 Fmax 를 정하는
+  // 경로다 — 32비트 덧셈이 PE 의 피드백 루프 안에 있다. 1 로 두면
+  // 16비트 두 덩이로 쪼개고, 최종 합산은 읽기 경로에서 한다. 지연과
+  // 동작이 바뀌지 않으므로 FSM 은 그대로다.
+  parameter int ACC_SPLIT = 0,
+
+  // 곱셈기 출력 레지스터 (mac_pe.sv 참고). **Fmax 의 지배 항목이다.**
+  // 실측 (ECP5-85K, PE 하나):
+  //
+  //   기준          101.09 MHz   곱셈+덧셈이 한 사이클에 직렬
+  //   ACC_SPLIT=1   103.69 MHz   +2.6%  (덧셈만 쪼갰다)
+  //   MUL_REG=1     139.43 MHz   +38%   (곱셈과 덧셈을 갈랐다)
+  //   둘 다         136.39 MHz   추가 이득 없음
+  //
+  // MUL_REG=1 이면 누산이 한 사이클 늦게 끝나므로 drain 을 그만큼
+  // 늘린다 (아래 C_POST). `en` 펄스 수는 그대로다.
+  parameter int MUL_REG = 1
 )(
   input  logic clk,
   input  logic rst_n,
@@ -279,13 +297,13 @@ module gemm_core #(
     bank_addr = SADDR_W'(b) * SADDR_W'(BANK_DEPTH) + SADDR_W'(idx);
   endfunction
 
-  function automatic logic [31:0] clamp_kt(input logic [31:0] in);
-    logic [31:0] mx;
-    begin
-      mx = MAX_KT;
-      clamp_kt = (in > mx) ? mx : in;
-    end
-  endfunction
+  // Kt 를 MAX_KT 로 자른 값. 전에는 함수(`clamp_kt`) 였다.
+  //
+  // 함수 안의 지역 변수를 비동기 리셋이 있는 always_ff 에서 부르면
+  // Yosys 가 그 지역 변수에 레지스터를 만들려 하고 "Multiple edge
+  // sensitive events found for this signal" 로 멈춘다. 순수 식이므로
+  // wire 하나로 두면 끝이고, 그래야 합성된다.
+  wire [31:0] kt_clamped = (Kt > 32'(MAX_KT)) ? 32'(MAX_KT) : Kt;
 
   // ----------------------------
   // FSM 선언
@@ -436,19 +454,37 @@ module gemm_core #(
     end
   end
 
-  integer bi;
+  // 뱅크별 디스크립터 값은 **뱅크마다 레지스터를 명시**한다.
+  //
+  // 전에는 `for (bi...) Kt_bank[bi] <= ...` 로 배열을 돌렸다. 그러면
+  // Yosys 가 배열을 메모리로 추론하는데, 비동기 리셋(negedge rst_n) 과
+  // 섞여 "Multiple edge sensitive events found for this signal" 로
+  // 합성이 멈춘다. BANKS 는 2~4 라 generate 로 펼치는 비용이 없다.
+  genvar bg;
+  generate
+    for (bg = 0; bg < BANKS; bg++) begin : G_BANK_DESC
+      always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+          Kt_bank[bg]  <= 32'd0;
+          out_bank[bg] <= 64'd0;
+          ak_bank[bg]  <= 1'b0;
+          nw_bank[bg]  <= 1'b0;
+        end else if (cmd_accept && (ld_bank == BANK_W'(bg))) begin
+          Kt_bank[bg]  <= kt_clamped;
+          out_bank[bg] <= out_addr;
+          ak_bank[bg]  <= acc_keep;
+          nw_bank[bg]  <= no_wb;
+        end
+      end
+    end
+  endgenerate
+
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       act_base_r <= 64'd0;
       wgt_base_r <= 64'd0;
       rd_len_r   <= '0;
       wgt_len_r  <= '0;
-      for (bi = 0; bi < BANKS; bi = bi + 1) begin
-        Kt_bank[bi]  <= 32'd0;
-        out_bank[bi] <= 64'd0;
-        ak_bank[bi]  <= 1'b0;
-        nw_bank[bi]  <= 1'b0;
-      end
     end else if (cmd_accept) begin
       act_base_r <= act_addr;
       wgt_base_r <= wgt_addr;
@@ -457,16 +493,11 @@ module gemm_core #(
       // 홀수면 Kt*16 바이트가 32 의 배수가 아니다. 워드 단위로 올림해
       // 요청한다. 남는 절반은 뱅크 마지막 워드의 상위에 들어가고
       // 연산은 k < Kt 만 읽으므로 사용되지 않는다.
-      rd_len_r   <= LEN_W'(((clamp_kt(Kt) + KPW - 1) / KPW) * RD_BEAT_B);
+      rd_len_r   <= LEN_W'(((kt_clamped + KPW - 1) / KPW) * RD_BEAT_B);
       // INT4 면 워드에 K-step 이 두 배 들어가므로 요청 길이가 절반이 된다.
       wgt_len_r  <= wgt_int4
-                  ? LEN_W'(((clamp_kt(Kt) + W4PW - 1) / W4PW) * RD_BEAT_B)
-                  : LEN_W'(((clamp_kt(Kt) + KPW  - 1) / KPW ) * RD_BEAT_B);
-
-      Kt_bank[ld_bank]  <= clamp_kt(Kt);
-      out_bank[ld_bank] <= out_addr;
-      ak_bank[ld_bank]  <= acc_keep;
-      nw_bank[ld_bank]  <= no_wb;
+                  ? LEN_W'(((kt_clamped + W4PW - 1) / W4PW) * RD_BEAT_B)
+                  : LEN_W'(((kt_clamped + KPW  - 1) / KPW ) * RD_BEAT_B);
     end
   end
 
@@ -639,8 +670,6 @@ module gemm_core #(
   logic act_issue_d, wgt_issue_d;    // ✅ 1-cycle delayed valid (SRAM->MAC align)
   logic issue_fire;
 
-  logic signed [7:0]  a_row [0:N-1];
-  logic signed [7:0]  b_col [0:N-1];
 
 // MAC internal result as packed flat vector (Icarus-safe — no unpacked array output port)
 logic [32*ACCS-1:0] acc_out_mac_flat;
@@ -650,23 +679,25 @@ logic signed [31:0] acc_out_mac [0:ACCS-1];  // continuous unpack from acc_out_m
 logic signed [31:0] acc_out_flat [0:ACCS-1]; // latch of mac result (reset-safe, Icarus-safe)
 // 출력 래치. OUT_BUFS 벌을 두고 연산 FSM 과 쓰기 FSM 이 포인터로
 // 주고받는다 (피연산자 SRAM 의 bank_full 핸드오버와 같은 구조).
-logic signed [31:0] acc_buf [0:OUT_BUFS-1][0:ACCS-1];
+// 버퍼마다 **packed** 벡터로 둔다. 원소 kk 는 acc_buf[b][32*kk +: 32].
+//
+// 전에는 2차원 unpacked 배열이었고, 쓰기 데이터를 만드는 `pack_beat`
+// 함수가 그것을 신호 인덱스로 읽었다. Yosys 는 함수 안의 그런 인덱싱을
+// 지원하지 않아 **`gemm_core` 전체가 합성되지 않았다.** packed 로 두면
+// 비트 하나가 그냥 부분선택이라 함수가 아예 필요 없다.
+logic [32*ACCS-1:0] acc_buf [0:OUT_BUFS-1];
 
   genvar i;
-  generate
-    for (i=0;i<N;i++) begin : ROW_UNPACK
-      assign a_row[i] = act_rdata[8*i +: 8];
-      assign b_col[i] = wgt_rdata[8*i +: 8];
-    end
-  endgenerate
 
-mac_array #(.N(N)) u_mac (
+// 피연산자는 SRAM 출력의 하위 N 바이트다. mac_array 가 평탄 벡터를
+// 받으므로 풀었다 다시 묶을 필요가 없다.
+mac_array #(.N(N), .ACC_SPLIT(ACC_SPLIT), .MUL_REG(MUL_REG)) u_mac (
   .clk(clk),
   .rst_n(rst_n),
   .en(mac_en),
   .acc_clr(mac_acc_clr),
-  .a_row(a_row),
-  .b_col(b_col),
+  .a_row(act_rdata[N*8-1:0]),
+  .b_col(wgt_rdata[N*8-1:0]),
   .acc_out_flat(acc_out_mac_flat)
 );
 
@@ -677,6 +708,15 @@ generate
     assign acc_out_mac[ui] = acc_out_mac_flat[ui*32 +: 32];
   end
 endgenerate
+
+  // drain 카운터. C_POST 에 머무는 사이클을 센다.
+  localparam int POST_W = 2;
+  logic [POST_W-1:0] post_cnt;
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n)               post_cnt <= '0;
+    else if (cst != C_POST)   post_cnt <= '0;
+    else if (post_cnt != POST_W'(3)) post_cnt <= post_cnt + 1'b1;
+  end
 
   // 연산 FSM 이 실제로 래치하고 넘어가는 사이클. C_LATCH 에서 쓰기 FSM 을
   // 기다리며 멈춰 있을 수 있으므로 상태만으로는 안 된다.
@@ -713,9 +753,10 @@ generate
         // C_CLR 에 도달할 때 아직 전송 중인 버퍼를 지워버리는 해저드가
         // 생기기 때문이다. Kt=0 이면 0 을 래치하므로 동작은 같다.
         if (!rst_n)
-          acc_buf[kb][kk] <= 32'sd0;
+          acc_buf[kb][32*kk +: 32] <= 32'd0;
         else if (cm_latch && (OBUF_W'(kb) == obuf_wp))
-          acc_buf[kb][kk] <= (Kt_cm != 0) ? acc_out_mac[kk] : 32'sd0;
+          acc_buf[kb][32*kk +: 32] <=
+                     (Kt_cm != 0) ? x32(acc_out_mac[kk]) : 32'd0;
       end
     end
   end
@@ -817,27 +858,31 @@ end
   logic [WR_DATA_W-1:0]   wr_data_r;
   logic                   wr_valid_r;
 
+  // 시뮬레이션에서 X 를 0 으로 클립한다. 하드웨어에는 X 가 없으므로
+  // 합성에서는 그냥 통과다 — `===` 는 합성 구문이 아니고, 이 함수가
+  // 데이터패스 안에 있어서 **`gemm_core` 전체가 합성되지 않았다**
+  // ("Non-constant function call in constant expression"). 그래서
+  // 이 설계의 클럭 주파수를 한 번도 측정할 수 없었다.
   function automatic logic [31:0] x32(input logic signed [31:0] v);
-    logic [31:0] t;
     begin
-      t = v;
-// FIX v0.2: X는 항상 0으로 클리핑
-      if ((^t === 1'bx)) x32 = 32'd0;
-      else              x32 = t;
-
+`ifdef COCOTB_SIM
+      if ((^v === 1'bx)) x32 = 32'd0;
+      else               x32 = v;
+`else
+      x32 = v;
+`endif
     end
   endfunction
 
-  // 누산기 WPB 개를 한 비트로 묶는다. 하위 워드가 낮은 인덱스다
-  // (리틀엔디안 메모리 순서와 맞춘다).
-  function automatic logic [WR_DATA_W-1:0] pack_beat(input int base);
-    int w;
-    begin
-      pack_beat = '0;
-      for (w = 0; w < WPB; w = w + 1)
-        pack_beat[w*32 +: 32] = x32(acc_buf[obuf_rp][base + w]);
-    end
-  endfunction
+  // 비트 하나 = 누산기 WPB 개 = WR_DATA_W 비트. 하위 워드가 낮은
+  // 인덱스다 (리틀엔디안 메모리 순서와 맞춘다). acc_buf 가 packed
+  // 이므로 부분선택 하나로 끝난다 — 함수가 필요 없고, 그래서 합성된다.
+  // 다음 비트 번호. 마지막에서 0 으로 감아 **부분선택이 범위를 넘지
+  // 않게** 한다 (넘으면 합성에서 0, 시뮬에서 X 가 되어 서로 다르다).
+  wire [BEAT_W-1:0] nxt_beat =
+           (out_beat == BEAT_W'(OUT_BEATS-1)) ? '0 : out_beat + 1'b1;
+  wire [WR_DATA_W-1:0] beat_next = acc_buf[obuf_rp][nxt_beat * WR_DATA_W +: WR_DATA_W];
+  wire [WR_DATA_W-1:0] beat_zero = acc_buf[obuf_rp][0 +: WR_DATA_W];
 
 `ifdef COCOTB_SIM
   initial begin
@@ -855,7 +900,7 @@ end
     end else begin
       if (wst == W_REQ && wr_req_ready) begin
         out_beat   <= '0;
-        wr_data_r  <= pack_beat(0);
+        wr_data_r  <= beat_zero;
         wr_valid_r <= 1'b1;
       end else if (wst == W_SEND) begin
         if (wr_valid_r && wr_data_ready) begin
@@ -863,7 +908,7 @@ end
             wr_valid_r <= 1'b0;
           end else begin
             out_beat   <= out_beat + 1'b1;
-            wr_data_r  <= pack_beat((out_beat + 1) * WPB);
+            wr_data_r  <= beat_next;
             wr_valid_r <= 1'b1;
           end
         end
@@ -982,7 +1027,7 @@ end
 
       // 단계 시작: 남은 양과 주소를 세팅한다.
       if (lst == L_IDLE && cmd_accept) begin
-        rd_left     <= LEN_W'(((clamp_kt(Kt) + KPW - 1) / KPW) * RD_BEAT_B);
+        rd_left     <= LEN_W'(((kt_clamped + KPW - 1) / KPW) * RD_BEAT_B);
         rd_cur_addr <= act_addr;
       end else if (lst_n == L_WGT_REQ && lst == L_ACT_RECV) begin
         rd_left     <= wgt_len_r;
@@ -1047,8 +1092,15 @@ end
       end
 
       C_POST: begin
-        // ✅ fixed 1-cycle drain: always move forward
-        cst_n = C_LATCH;
+        // 마지막 곱이 누산기에 들어갈 때까지 기다린다.
+        //
+        // MUL_REG=0 이면 1 사이클이면 된다 (mac_en 이 선 사이클에
+        // 누산된다). MUL_REG=1 이면 PE 안에서 한 단 더 늦으므로
+        // 2 사이클이다. 이걸 안 늘리면 **마지막 K-step 이 누락되고,
+        // Kt=1 에서는 우연히 맞아 조용히 틀린다** — INT8 경로에서
+        // mac_en 정렬로 정확히 그렇게 당했다.
+        if (post_cnt >= POST_W'(MUL_REG))
+          cst_n = C_LATCH;
       end
 
       C_LATCH: begin

@@ -70,7 +70,18 @@ module mxu_bf16_16x16 #(
   //
   // COLS 를 나누는 2의 거듭제곱이어야 한다. `rd_idx` 의 하위
   // log2(RD_LANES) 비트는 무시된다 (레인 0 이 그 그룹의 첫 열이다).
-  parameter int RD_LANES  = 1
+  parameter int RD_LANES  = 1,
+
+  // 누산기 뱅크 수 (`STREAM_RD=1` 일 때만 1 이상이 의미가 있다).
+  //
+  // 1 이면 누산기가 한 벌이다. 공유 변환기로 읽는 동안 다음 디스크립터가
+  // `acc_clr` 을 세울 수 없으므로(읽는 중인 값을 지운다) 연산과 쓰기가
+  // 겹치지 못한다. 그 비용은 디스크립터당 OUT_BEATS 사이클이다.
+  //
+  // 2 면 핑퐁이다. `snap` 한 사이클로 방금 끝난 뱅크를 **읽기 쪽**으로
+  // 넘기고, 연산은 다른 뱅크에서 바로 다음 디스크립터를 시작한다.
+  // 비용은 누산기 한 벌의 플롭 (ROWS×COLS×ACC_W).
+  parameter int ACC_BUFS  = 1
 )(
   input  logic        clk,
   input  logic        rst_n,
@@ -87,6 +98,10 @@ module mxu_bf16_16x16 #(
   // 행 우선 평탄화: 원소 (r,c) 는 acc_out[32*(r*COLS + c) +: 32]
   output logic [ROWS*COLS*32-1:0] acc_out,
 
+  // 누산기 뱅크 교체 (ACC_BUFS=2 일 때만 유효). 한 사이클 펄스.
+  // 방금 누산을 끝낸 뱅크가 읽기 쪽이 되고, 반대쪽이 연산 쪽이 된다.
+  input  logic        snap,
+
   // 공유 변환기 순차 읽기 (STREAM_RD=1 일 때만 유효)
   input  logic [$clog2(ROWS*COLS)-1:0] rd_idx,
   output logic [RD_LANES*32-1:0]       rd_fp32,
@@ -102,26 +117,55 @@ module mxu_bf16_16x16 #(
   // ═══════════════════════════════════════════════════════════
 
   // 누산기는 모듈 레벨에 둔다. 공유 변환기가 인덱스로 고를 수 있어야 한다.
-  logic signed [bf16_pkg::ACC_W-1:0] acc_fxp [0:ROWS-1][0:COLS-1];
+  // 뱅크가 둘이면 연산 쪽(wbank) 과 읽기 쪽(rbank) 이 갈린다.
+  logic signed [bf16_pkg::ACC_W-1:0]
+        acc_fxp [0:ACC_BUFS-1][0:ROWS-1][0:COLS-1];
 
-  genvar r, c, ln;
+  // 뱅크 포인터. ACC_BUFS=1 이면 둘 다 0 에 고정이고 snap 은 무시된다.
+  logic wbank, rbank;
   generate
+    if (ACC_BUFS > 1) begin : G_PINGPONG
+      always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+          wbank <= 1'b0;
+          rbank <= 1'b1;
+        end else if (snap) begin
+          // 방금 끝난 연산 뱅크를 읽기 쪽으로 넘기고 자리를 바꾼다.
+          rbank <= wbank;
+          wbank <= ~wbank;
+        end
+      end
+    end else begin : G_SINGLE
+      assign wbank = 1'b0;
+      assign rbank = 1'b0;
+    end
+  endgenerate
+
+  genvar r, c, ln, ab;
+  generate
+    for (ab = 0; ab < ACC_BUFS; ab = ab + 1) begin : GEN_BANK
     for (r = 0; r < ROWS; r = r + 1) begin : GEN_ROW
       for (c = 0; c < COLS; c = c + 1) begin : GEN_COL
 
-        // 곱 → 고정소수점 증분 (조합)
+        // 곱 → 고정소수점 증분 (조합). 뱅크마다 같은 식이지만, 활성
+        // 뱅크만 레지스터를 갱신하므로 합성에서 곱셈기는 공유된다.
         logic signed [bf16_pkg::ACC_W-1:0] incr;
         assign incr = bf16_pkg::bf16_mul_fxp(a_row[16*r +: 16],
                                              b_col[16*c +: 16]);
 
+        // 이 뱅크가 연산 쪽인가. 뱅크가 하나면 항상 그렇다.
+        wire mine = (ACC_BUFS > 1) ? (wbank == ab[0]) : 1'b1;
+
         // 누산기: 매 사이클 경로는 시프트 + 덧셈뿐이다.
         always_ff @(posedge clk or negedge rst_n) begin
-          if (!rst_n)       acc_fxp[r][c] <= '0;
-          else if (acc_clr) acc_fxp[r][c] <= '0;
-          else if (en)      acc_fxp[r][c] <= bf16_pkg::fxp_add_sat(acc_fxp[r][c], incr);
+          if (!rst_n)               acc_fxp[ab][r][c] <= '0;
+          else if (acc_clr && mine) acc_fxp[ab][r][c] <= '0;
+          else if (en && mine)
+            acc_fxp[ab][r][c] <= bf16_pkg::fxp_add_sat(acc_fxp[ab][r][c], incr);
         end
 
       end
+    end
     end
   endgenerate
 
@@ -134,6 +178,14 @@ module mxu_bf16_16x16 #(
         $fatal(1, "mxu_bf16_16x16: RD_LANES(%0d) 가 2의 거듭제곱이 아니다",
                RD_LANES);
     end
+    if (ACC_BUFS != 1 && ACC_BUFS != 2)
+      $fatal(1, "mxu_bf16_16x16: ACC_BUFS(%0d) 는 1 또는 2 여야 한다",
+             ACC_BUFS);
+    // FP32_OUT 은 누산기를 조합으로 전부 내보낸다. 핑퐁이면 어느 뱅크를
+    // 내보내야 하는지가 정의되지 않으므로 금지한다 (FP32_OUT 쪽은
+    // mxu_core 가 acc_lat 으로 이미 겹치기를 얻는다).
+    if (ACC_BUFS > 1 && FP32_OUT != 0)
+      $fatal(1, "mxu_bf16_16x16: ACC_BUFS>1 은 FP32_OUT=0 에서만 쓴다");
   end
 
   // ─── 출력 경로 ────────────────────────────────────────────────
@@ -143,7 +195,7 @@ module mxu_bf16_16x16 #(
       for (r = 0; r < ROWS; r = r + 1) begin : OR_
         for (c = 0; c < COLS; c = c + 1) begin : OC_
           assign acc_out[32*(r*COLS + c) +: 32] =
-                     bf16_pkg::fxp_to_fp32(acc_fxp[r][c]);
+                     bf16_pkg::fxp_to_fp32(acc_fxp[0][r][c]);
         end
       end
     end else begin : G_NO_CONV
@@ -169,7 +221,7 @@ module mxu_bf16_16x16 #(
 
       for (ln = 0; ln < RD_LANES; ln = ln + 1) begin : G_LANE
         logic signed [bf16_pkg::ACC_W-1:0] lane_sel;
-        assign lane_sel = acc_fxp[rd_r][rd_c + CW'(ln)];
+        assign lane_sel = acc_fxp[rbank][rd_r][rd_c + CW'(ln)];
         assign rd_fp32[32*ln +: 32] = bf16_pkg::fxp_to_fp32(lane_sel);
       end
     end else begin : G_NO_STREAM
