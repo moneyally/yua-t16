@@ -27,6 +27,15 @@ RTL 의 weight-stationary 는 **호스트가 그 순서로 내보낼 때만** �
 
 실제 레이어는 `max_kt` 를 K 이상으로 잡으면 첫 경로로 간다. K=4096,
 T=32, 2코어면 SRAM 1MB 로 VC1902 온칩 20.5MB 안에 충분히 들어간다.
+(가장 깊은 7B 레이어 K=11008 도 4코어 5.4MB 다.)
+
+> 이것이 가능해진 것은 DMA 요청 쪼개기를 넣은 뒤다. `rd_req_len_bytes`
+> 가 16비트라 256비트 읽기에서 한 요청이 65,504바이트를 넘지 못하는데,
+> 그 전에는 Kt=2048 부터 길이가 **조용히 잘렸다** (Kt=11008 은
+> 0x6000=24,576B 라는 그럴듯한 짧은 요청이 되어 틀린 결과를 냈다).
+> 지금은 로드 FSM 이 긴 전송을 여러 요청으로 나눈다.
+> `sim/cocotb/test_real_layer_depth.py` 가 K=4096 을 단일 디스크립터로
+> 돌려 요청이 쪼개지고 주소가 연속인지까지 확인한다.
 
 ## M=1 (단일 토큰 디코드) 의 구조적 한계
 
@@ -38,7 +47,14 @@ A 는 T 행이다. M=1 이면 1/T 만 쓰고 나머지는 패딩이다. 디코�
 from __future__ import annotations
 
 import argparse
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
+
+# 직접 실행(`python3 tools/gemm_tiler.py`)해도 `tools.` 임포트가 되게 한다.
+# 패키지로 임포트될 때는 아무 영향이 없다.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # 디스크립터 flags. SSOT 는 tools/orbit_mmio_map.py 의 DescFlag 이고
 # 그것이 rtl/ctrl_fsm.sv 의 FLAG_* 와 대조된다. 여기서 다시 정의하면

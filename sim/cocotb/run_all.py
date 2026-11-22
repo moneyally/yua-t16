@@ -44,6 +44,8 @@ OVERRIDES: dict[str, str] = {
     "test_ksplit":               "gemm_top",
     "test_gemm_e2e":             "gemm_cluster",
     "test_dma_latency":          "gemm_core",
+    "test_real_layer_depth":     "gemm_top",
+    "test_odd_depth":            "gemm_top",
     "test_mxu128_kstep":         "mxu_bf16_128x128",
     "test_mac_array":            "mac_array",
     "test_gemm_int4":            "gemm_int4",
@@ -110,6 +112,14 @@ VARIANTS: dict[str, tuple[str, dict]] = {
     "test_pipe_profile":    ("gemm_core", {"RD_DATA_W": 256, "BANKS": 2}),
     "test_dma_latency":     ("gemm_core", {"RD_DATA_W": 256, "BANKS": 2}),
     "test_wr256":           ("gemm_top", {"WR_DATA_W": 256}),
+    # 실제 LLM 레이어 깊이. 16비트 길이 필드 때문에 한 요청이
+    # 65,504B 를 넘지 못하므로 긴 전송이 쪼개져야 한다.
+    "test_real_layer_depth": ("gemm_top", {"MAX_KT": 4096, "TILE_N": 32,
+                                           "RD_DATA_W": 256, "WR_DATA_W": 256}),
+    # 2의 거듭제곱이 아닌 깊이. 뱅크 주소 이어 붙이기가 깨지는 성질을
+    # 빠르게 지킨다 (실제 깊이 11008 은 같은 성질, 시뮬이 느리다).
+    "test_odd_depth":       ("gemm_top", {"MAX_KT": 300, "TILE_N": 16,
+                                          "RD_DATA_W": 128, "WR_DATA_W": 128}),
     # 32x32 타일은 K-step 이 32바이트라 읽기 폭 256비트를 요구하고,
     # 출력이 N²=1,024 개라 쓰기도 256비트여야 균형이 맞는다.
     "test_tile32":          ("gemm_top", {"TILE_N": 32, "RD_DATA_W": 256,

@@ -176,6 +176,22 @@ module gemm_core #(
   localparam int WR_BEAT_B  = WR_DATA_W / 8;          // 비트당 바이트
   localparam int RD_BEAT_B  = RD_DATA_W / 8;
 
+  // ── DMA 요청 길이의 한계 ────────────────────────────────────────
+  //
+  // rd_req_len_bytes 는 16비트다. 256비트 읽기에서 한 요청은 최대
+  // 65,504바이트(비트 2,047개)까지다. Kt 가 그보다 깊으면 길이가
+  // **조용히 잘린다** — Kt=2048 은 0 이 되어 멈추고, Kt=11008 은
+  // 0x6000(24,576B)이라는 그럴듯한 짧은 요청이 되어 틀린 결과를 낸다.
+  //
+  // 실제 LLM 레이어는 K=4096 / 11008 이라 이 한계에 바로 걸린다.
+  // 그래서 긴 전송을 여러 요청으로 쪼갠다 — 실제 DMA 엔진도 PCIe MPS 와
+  // AXI 4KB 경계 때문에 같은 일을 한다.
+  //
+  // 길이 카운터는 32비트로 둔다. MAX_KT * RD_BEAT_B 가 16비트를 넘으므로
+  // 16비트로 세면 같은 잘림이 카운터에서 되살아난다.
+  localparam int LEN_W      = 32;
+  localparam int RD_REQ_MAX = (65535 / RD_BEAT_B) * RD_BEAT_B;
+
   // 워드 하나에 들어가는 K-step 수
   localparam int KPW   = RD_DATA_W / KSTEP_W;
   localparam int KPW_W = (KPW > 1) ? $clog2(KPW) : 1;
@@ -192,7 +208,12 @@ module gemm_core #(
   localparam int BANK_DEPTH  = (MAX_KT + KPW - 1) / KPW;   // 뱅크당 워드 수
   localparam int BADDR_W     = $clog2(BANK_DEPTH);         // 뱅크 내 주소
   localparam int SRAM_DEPTH  = BANK_DEPTH * BANKS;
-  localparam int SADDR_W     = BADDR_W + BANK_W;
+  // 뱅크 주소를 `{bank, idx}` 로 이어 붙이면 BANK_DEPTH 가 2의 거듭제곱
+  // 이어야 한다. 실제 LLM 레이어 깊이는 그렇지 않다 (K=11008).
+  // 11008 이면 뱅크 1 이 16,384..27,391 을 가리켜 SRAM 범위 0..22,015 를
+  // 넘는다 — 첫 디스크립터는 뱅크 0 만 쓰므로 통과하고, **두 번째부터
+  // 조용히 틀린다.** 그래서 뱅크 기점을 곱셈으로 계산한다.
+  localparam int SADDR_W     = $clog2(SRAM_DEPTH);
 
   initial begin
     if (RD_DATA_W != 128 && RD_DATA_W != 256 && RD_DATA_W != 512)
@@ -210,10 +231,22 @@ module gemm_core #(
     // INT4 니블이 바이트 경계에 맞아야 한다 (N 이 짝수).
     if (N % 2 != 0)
       $fatal(1, "gemm_core: TILE_N must be even for INT4 weights (got %0d)", N);
+    // 쓰기 요청 길이도 16비트다. TILE_N=128 이면 N²×4 = 65,536 으로 넘친다.
+    if (OUT_BYTES > 65535)
+      $fatal(1, "gemm_core: OUT_BYTES %0d exceeds the 16-bit wr_req_len_bytes field",
+             OUT_BYTES);
     if (OUT_BEATS * WPB != ACCS)
       $fatal(1, "gemm_core: TILE_N^2 (%0d) must be a multiple of WR_DATA_W/32 (%0d)",
              ACCS, WPB);
   end
+
+  // 뱅크 b 의 idx 번째 워드. BANK_DEPTH 가 2의 거듭제곱이 아니어도 맞는다.
+  // BANKS 가 작은 2의 거듭제곱이므로 합성에서는 덧셈 몇 개가 된다.
+  function automatic logic [SADDR_W-1:0] bank_addr(
+      input logic [BANK_W-1:0]  b,
+      input logic [BADDR_W-1:0] idx);
+    bank_addr = SADDR_W'(b) * SADDR_W'(BANK_DEPTH) + SADDR_W'(idx);
+  endfunction
 
   function automatic logic [31:0] clamp_kt(input logic [31:0] in);
     logic [31:0] mx;
@@ -279,8 +312,9 @@ module gemm_core #(
   wire        nw_cm  = nw_bank[cm_bank];
 
   logic [63:0] act_base_r, wgt_base_r;
-  logic [15:0] rd_len_r;    // 활성값 (INT8)
-  logic [15:0] wgt_len_r;   // 가중치 (INT8 또는 INT4)
+  // 전체 전송 길이. 요청 하나의 길이가 아니다 (위 RD_REQ_MAX 참조).
+  logic [LEN_W-1:0] rd_len_r;    // 활성값 (INT8)
+  logic [LEN_W-1:0] wgt_len_r;   // 가중치 (INT8 또는 INT4)
 
   // ── Weight-stationary 상태 ──────────────────────────────────────
   // 가중치를 한 번이라도 적재했는가. 적재 전에는 wgt_keep 을 무시해야
@@ -368,8 +402,8 @@ module gemm_core #(
     if (!rst_n) begin
       act_base_r <= 64'd0;
       wgt_base_r <= 64'd0;
-      rd_len_r   <= 16'd0;
-      wgt_len_r  <= 16'd0;
+      rd_len_r   <= '0;
+      wgt_len_r  <= '0;
       for (bi = 0; bi < BANKS; bi = bi + 1) begin
         Kt_bank[bi]  <= 32'd0;
         out_bank[bi] <= 64'd0;
@@ -384,11 +418,11 @@ module gemm_core #(
       // 홀수면 Kt*16 바이트가 32 의 배수가 아니다. 워드 단위로 올림해
       // 요청한다. 남는 절반은 뱅크 마지막 워드의 상위에 들어가고
       // 연산은 k < Kt 만 읽으므로 사용되지 않는다.
-      rd_len_r   <= 16'(((clamp_kt(Kt) + KPW - 1) / KPW) * RD_BEAT_B);
+      rd_len_r   <= LEN_W'(((clamp_kt(Kt) + KPW - 1) / KPW) * RD_BEAT_B);
       // INT4 면 워드에 K-step 이 두 배 들어가므로 요청 길이가 절반이 된다.
       wgt_len_r  <= wgt_int4
-                  ? 16'(((clamp_kt(Kt) + W4PW - 1) / W4PW) * RD_BEAT_B)
-                  : 16'(((clamp_kt(Kt) + KPW  - 1) / KPW ) * RD_BEAT_B);
+                  ? LEN_W'(((clamp_kt(Kt) + W4PW - 1) / W4PW) * RD_BEAT_B)
+                  : LEN_W'(((clamp_kt(Kt) + KPW  - 1) / KPW ) * RD_BEAT_B);
 
       Kt_bank[ld_bank]  <= clamp_kt(Kt);
       out_bank[ld_bank] <= out_addr;
@@ -472,9 +506,19 @@ module gemm_core #(
   );
 
   // 수신 비트 = 뱅크 내 워드 인덱스. 상위에 뱅크 비트를 붙인다.
+  // 현재 단계(ACT 또는 WGT)에서 남은 바이트와 다음 요청 주소.
+  // 요청 하나가 RD_REQ_MAX 를 넘지 못하므로 여러 번 나눠 낸다.
+  logic [LEN_W-1:0] rd_left;
+  logic [63:0]      rd_cur_addr;
+  // 이번 요청의 길이 (수락 시 남은 양에서 빼기 위해 조합으로 계산)
+  wire  [LEN_W-1:0] rd_this_len =
+          (rd_left > LEN_W'(RD_REQ_MAX)) ? LEN_W'(RD_REQ_MAX) : rd_left;
+  // 이 단계의 첫 요청인가 (load_idx 리셋 시점)
+  logic phase_begin;
+
   logic [BADDR_W-1:0] load_idx;
-  assign act_waddr = {ld_bank, load_idx};
-  assign wgt_waddr = {wld_bank, load_idx};
+  assign act_waddr = bank_addr(ld_bank,  load_idx);
+  assign wgt_waddr = bank_addr(wld_bank, load_idx);
 
   // ✅ hold read address at "last issued" k to avoid reading past Kt
   logic [ADDR_W-1:0] rd_k_r;
@@ -495,13 +539,13 @@ module gemm_core #(
 
   generate
     if (KPW == 1) begin : G_W128
-      assign act_raddr    = {cm_bank, rd_k_mux[BADDR_W-1:0]};
+      assign act_raddr    = bank_addr(cm_bank, rd_k_mux[BADDR_W-1:0]);
       assign wgt_wa8      = rd_k_mux[BADDR_W-1:0];
       assign rd_half      = '0;
       assign act_rdata    = act_word;
       assign wgt_rdata_i8 = wgt_word;
     end else begin : G_WIDE
-      assign act_raddr    = {cm_bank, rd_k_mux[KPW_W +: BADDR_W]};
+      assign act_raddr    = bank_addr(cm_bank, rd_k_mux[KPW_W +: BADDR_W]);
       assign wgt_wa8      = rd_k_mux[KPW_W +: BADDR_W];
       assign rd_half      = rd_k_mux[KPW_W-1:0];
       assign act_rdata    = act_word[rd_half_q*KSTEP_W +: KSTEP_W];
@@ -522,7 +566,7 @@ module gemm_core #(
   wire [ADDR_W-1:0]   w4_word_idx = rd_k_mux >> W4PW_W;
   wire [BADDR_W-1:0]  wgt_wa4     = w4_word_idx[BADDR_W-1:0];
 
-  assign wgt_raddr = {wgt_bank_cm, w4_cm ? wgt_wa4 : wgt_wa8};
+  assign wgt_raddr = bank_addr(wgt_bank_cm, w4_cm ? wgt_wa4 : wgt_wa8);
 
   // 니블 N 개를 꺼내 8비트로 부호확장한다. INT4 는 2의 보수 [-8, 7] 이다.
   wire [NIB_W-1:0] w4_nibbles = wgt_word[w4_sub_q*NIB_W +: NIB_W];
@@ -778,7 +822,9 @@ end
 
     rd_req_valid     = 1'b0;
     rd_req_addr      = 64'd0;
-    rd_req_len_bytes = rd_len_r;
+    // 기본값은 이번 조각의 길이다. rd_len_r 은 전체 길이이므로 그대로
+    // 쓰면 16비트로 잘린다 — 그것이 바로 이 작업이 고친 버그다.
+    rd_req_len_bytes = 16'(rd_this_len);
 
     act_we        = 1'b0;
     wgt_we        = 1'b0;
@@ -788,17 +834,23 @@ end
     case (lst)
       L_IDLE: if (cmd_accept) lst_n = L_ACT_REQ;
 
+      // 요청 하나는 최대 RD_REQ_MAX 바이트다. 남은 양이 더 많으면
+      // 수신이 끝난 뒤 다시 REQ 로 돌아와 이어서 요청한다.
       L_ACT_REQ: begin
-        rd_req_valid = 1'b1;
-        rd_req_addr  = act_base_r;
+        rd_req_valid     = 1'b1;
+        rd_req_addr      = rd_cur_addr;
+        rd_req_len_bytes = 16'(rd_this_len);
         if (rd_req_ready) lst_n = L_ACT_RECV;
       end
 
       L_ACT_RECV: begin
         if (rd_data_valid && rd_data_ready) act_we = 1'b1;
-        // ✅ "진짜 마지막 beat" 기준으로 수신 완료 확정
+        // rd_data_last 는 **이 요청의** 마지막 비트다. 전체 전송의
+        // 마지막인지는 rd_left 로 따로 판단한다.
         if (rd_data_valid && rd_data_ready && rd_data_last) begin
-          if (wgt_skip_r) begin
+          if (rd_left != '0) begin
+            lst_n = L_ACT_REQ;          // 아직 남았다 — 이어서 요청
+          end else if (wgt_skip_r) begin
             // 가중치는 SRAM 에 상주한다. 읽을 것이 없으니 바로 넘긴다.
             ld_mark = 1'b1;
             lst_n   = L_IDLE;
@@ -810,38 +862,65 @@ end
 
       L_WGT_REQ: begin
         rd_req_valid     = 1'b1;
-        rd_req_addr      = wgt_base_r;
-        // 가중치는 INT4 면 절반만 읽는다.
-        rd_req_len_bytes = wgt_len_r;
+        rd_req_addr      = rd_cur_addr;
+        rd_req_len_bytes = 16'(rd_this_len);
         if (rd_req_ready) lst_n = L_WGT_RECV;
       end
 
       L_WGT_RECV: begin
         if (rd_data_valid && rd_data_ready) wgt_we = 1'b1;
         if (rd_data_valid && rd_data_ready && rd_data_last) begin
-          wgt_load_done = 1'b1;
-          // 마지막 워드는 이 에지에 SRAM 에 들어가고 bank_full 도 같은
-          // 에지에 선다. 연산 FSM 은 다음 사이클에야 그것을 보므로
-          // 첫 읽기는 그 뒤가 된다. 해저드 없음.
-          ld_mark = 1'b1;
-          lst_n   = L_IDLE;
+          if (rd_left != '0) begin
+            lst_n = L_WGT_REQ;          // 아직 남았다
+          end else begin
+            wgt_load_done = 1'b1;
+            // 마지막 워드는 이 에지에 SRAM 에 들어가고 bank_full 도 같은
+            // 에지에 선다. 연산 FSM 은 다음 사이클에야 그것을 보므로
+            // 첫 읽기는 그 뒤가 된다. 해저드 없음.
+            ld_mark = 1'b1;
+            lst_n   = L_IDLE;
+          end
         end
       end
 
       default: lst_n = L_IDLE;
     endcase
+
+    // 단계의 첫 요청에서만 load_idx 를 0 으로 되돌린다. 쪼개진 두 번째
+    // 요청에서 되돌리면 SRAM 주소가 앞으로 되감겨 앞 조각을 덮어쓴다.
+    phase_begin = (lst == L_IDLE && cmd_accept)
+               || (lst == L_ACT_RECV && rd_data_valid && rd_data_ready
+                   && rd_data_last && rd_left == '0 && !wgt_skip_r);
   end
+
+  wire rd_req_fire = rd_req_valid & rd_req_ready;
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      lst      <= L_IDLE;
-      load_idx <= '0;
+      lst         <= L_IDLE;
+      load_idx    <= '0;
+      rd_left     <= '0;
+      rd_cur_addr <= 64'd0;
     end else begin
       lst <= lst_n;
 
-      if (lst == L_ACT_REQ && rd_req_valid && rd_req_ready) load_idx <= '0;
-      else if (lst == L_WGT_REQ && rd_req_valid && rd_req_ready) load_idx <= '0;
-      else if ((lst == L_ACT_RECV || lst == L_WGT_RECV) && rd_data_valid && rd_data_ready)
+      // 단계 시작: 남은 양과 주소를 세팅한다.
+      if (lst == L_IDLE && cmd_accept) begin
+        rd_left     <= LEN_W'(((clamp_kt(Kt) + KPW - 1) / KPW) * RD_BEAT_B);
+        rd_cur_addr <= act_addr;
+      end else if (lst_n == L_WGT_REQ && lst == L_ACT_RECV) begin
+        rd_left     <= wgt_len_r;
+        rd_cur_addr <= wgt_base_r;
+      end else if (rd_req_fire) begin
+        // 요청을 냈다 — 남은 양에서 빼고 주소를 전진시킨다.
+        rd_left     <= rd_left - rd_this_len;
+        rd_cur_addr <= rd_cur_addr + 64'(rd_this_len);
+      end
+
+      if (phase_begin)
+        load_idx <= '0;
+      else if ((lst == L_ACT_RECV || lst == L_WGT_RECV)
+               && rd_data_valid && rd_data_ready)
         load_idx <= load_idx + 1'b1;
     end
   end
